@@ -1,0 +1,9 @@
+[project]
+name = "agent-llm-gateway"
+version = "0.1.0"
+description = "Local transparent gateway for observing Codex and OpenAI API traffic"
+requires-python = ">=3.9"
+dependencies = []
+
+[tool.uv]
+package = false
