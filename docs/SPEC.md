@@ -171,3 +171,9 @@ erDiagram
 ```
 
 MVP 启用 `sessions`、`calls`、`attempts`、`payloads` 和 `usage`；`stream_chunks` 作为后续扩展，默认不逐 chunk 持久化。
+
+## 13. 当前实现约定
+
+实现代码位于 `agent_gateway_pkg/`，按配置、数据库、代理、headers、usage、保留策略和 CLI 分模块组织；`agent_gateway.py` 仅作为兼容入口。推荐运行方式为 `uv run python -m agent_gateway ...`。
+
+请求和响应默认最多各保存 10 MiB，可通过 `AGENT_GATEWAY_MAX_BODY` 调整。超过限制时只保存前缀，并将对应的 `request_truncated` 或 `response_truncated` 设为 1；`response_complete` 表示上游传输是否完整，和 HTTP 状态码无关。
