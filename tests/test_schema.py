@@ -1,6 +1,6 @@
 import argparse, json, os, sqlite3, subprocess, sys
 from pathlib import Path
-import agent_gateway as g
+import prompt_harbor as g
 
 def db_with_schema(tmp_path):
     p=tmp_path/'x.db'; g.init(str(p)); return p
@@ -28,15 +28,15 @@ def test_model_extraction_shape(): assert json.loads('{"model":"m"}')['model']==
 def test_stream_boolean(): assert bool(json.loads('{"stream":true}')['stream'])
 def test_headers_case_insensitive(): assert 'authorization' not in {k.lower() for k in g.headers({'authorization':'x'})}
 def test_init_cli(tmp_path):
-    p=tmp_path/'c.db'; r=subprocess.run([sys.executable,'agent_gateway.py','init','--database',str(p)],capture_output=True,text=True); assert r.returncode==0 and p.exists()
+    p=tmp_path/'c.db'; r=subprocess.run([sys.executable,'prompt_harbor.py','init','--database',str(p)],capture_output=True,text=True); assert r.returncode==0 and p.exists()
 def test_help_mentions_commands():
-    r=subprocess.run([sys.executable,'agent_gateway.py','--help'],capture_output=True,text=True); assert r.returncode==0; assert all(x in r.stdout for x in ('start','init','list','show','purge','--database','--listen','--upstream'))
+    r=subprocess.run([sys.executable,'prompt_harbor.py','--help'],capture_output=True,text=True); assert r.returncode==0; assert all(x in r.stdout for x in ('start','init','list','show','purge','--database','--listen','--upstream'))
 def test_list_empty(tmp_path):
-    p=db_with_schema(tmp_path); r=subprocess.run([sys.executable,'agent_gateway.py','list','--database',str(p)],capture_output=True,text=True); assert r.returncode==0 and r.stdout==''
+    p=db_with_schema(tmp_path); r=subprocess.run([sys.executable,'prompt_harbor.py','list','--database',str(p)],capture_output=True,text=True); assert r.returncode==0 and r.stdout==''
 def test_show_missing_nonzero(tmp_path):
-    p=db_with_schema(tmp_path); r=subprocess.run([sys.executable,'agent_gateway.py','show','999','--database',str(p)],capture_output=True,text=True); assert r.returncode!=0 and 'not found' in r.stderr
+    p=db_with_schema(tmp_path); r=subprocess.run([sys.executable,'prompt_harbor.py','show','999','--database',str(p)],capture_output=True,text=True); assert r.returncode!=0 and 'not found' in r.stderr
 def test_env_database(tmp_path):
-    p=tmp_path/'e.db'; e=dict(os.environ,AGENT_GATEWAY_DB=str(p)); r=subprocess.run([sys.executable,'agent_gateway.py','init'],env=e,capture_output=True,text=True); assert r.returncode==0 and p.exists()
+    p=tmp_path/'e.db'; e=dict(os.environ,PROMPT_HARBOR_DB=str(p)); r=subprocess.run([sys.executable,'prompt_harbor.py','init'],env=e,capture_output=True,text=True); assert r.returncode==0 and p.exists()
 def test_calls_schema_columns(tmp_path):
     p=db_with_schema(tmp_path); cols={r[1] for r in sqlite3.connect(p).execute('pragma table_info(calls)')}; assert {'session_id','model','stream','status_code','duration_ms'}<=cols
 def test_payload_schema_columns(tmp_path):

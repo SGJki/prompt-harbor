@@ -36,7 +36,7 @@ def test_sse_capture_and_auth(tmp_path):
     except PermissionError as exc:
         pytest.fail(f'loopback unavailable: {exc}')
     threading.Thread(target=up.serve_forever,daemon=True).start()
-    port=free(); db=tmp_path/'g.db'; proc=subprocess.Popen([sys.executable,str(ROOT/'agent_gateway.py'),'start','--database',str(db),'--listen',f'127.0.0.1:{port}','--upstream',f'http://127.0.0.1:{up.server_port}'],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+    port=free(); db=tmp_path/'g.db'; proc=subprocess.Popen([sys.executable,str(ROOT/'prompt_harbor.py'),'start','--database',str(db),'--listen',f'127.0.0.1:{port}','--upstream',f'http://127.0.0.1:{up.server_port}'],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
     try:
         deadline=time.time()+5
         while time.time()<deadline:
@@ -61,7 +61,7 @@ def test_sse_capture_and_auth(tmp_path):
     finally: proc.terminate(); proc.wait(timeout=3); up.shutdown()
 
 def run_gateway(tmp_path, upstream, extra_env=None):
-    port=free(); db=tmp_path/'g.db'; env=dict(os.environ); env.update(extra_env or {}); proc=subprocess.Popen([sys.executable,str(ROOT/'agent_gateway.py'),'start','--database',str(db),'--listen',f'127.0.0.1:{port}','--upstream',f'http://127.0.0.1:{upstream.server_port}'],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,env=env)
+    port=free(); db=tmp_path/'g.db'; env=dict(os.environ); env.update(extra_env or {}); proc=subprocess.Popen([sys.executable,str(ROOT/'prompt_harbor.py'),'start','--database',str(db),'--listen',f'127.0.0.1:{port}','--upstream',f'http://127.0.0.1:{upstream.server_port}'],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,env=env)
     deadline=time.time()+5
     while time.time()<deadline:
         try:
@@ -76,7 +76,7 @@ def test_json_transparent_forward(tmp_path):
     finally: proc.terminate(); proc.wait(); up.shutdown()
 
 def test_storage_limit_sets_truncated_flags(tmp_path):
-    up=ThreadingHTTPServer(('127.0.0.1',0),JsonUpstream); threading.Thread(target=up.serve_forever,daemon=True).start(); proc,port,db=run_gateway(tmp_path,up,{'AGENT_GATEWAY_MAX_BODY':'4'})
+    up=ThreadingHTTPServer(('127.0.0.1',0),JsonUpstream); threading.Thread(target=up.serve_forever,daemon=True).start(); proc,port,db=run_gateway(tmp_path,up,{'PROMPT_HARBOR_MAX_BODY':'4'})
     try:
         c=http.client.HTTPConnection('127.0.0.1',port); c.request('POST','/v1/responses',b'123456789'); r=c.getresponse(); r.read(); c.close(); time.sleep(.2)
         row=sqlite3.connect(db).execute('select request_truncated,response_truncated,length(request_body),length(response_body) from payloads').fetchone(); assert row==(1,1,4,4)
@@ -102,7 +102,7 @@ def test_upstream_error_status_preserved(tmp_path, code):
     finally: proc.terminate(); proc.wait(); up.shutdown()
 
 def test_upstream_connection_failure_returns_502(tmp_path):
-    port=free(); db=tmp_path/'g.db'; proc=subprocess.Popen([sys.executable,str(ROOT/'agent_gateway.py'),'start','--database',str(db),'--listen',f'127.0.0.1:{port}','--upstream','http://127.0.0.1:1'],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+    port=free(); db=tmp_path/'g.db'; proc=subprocess.Popen([sys.executable,str(ROOT/'prompt_harbor.py'),'start','--database',str(db),'--listen',f'127.0.0.1:{port}','--upstream','http://127.0.0.1:1'],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
     try:
         deadline=time.time()+5
         while time.time()<deadline:

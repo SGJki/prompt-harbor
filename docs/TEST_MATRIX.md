@@ -10,7 +10,7 @@
 | Security redaction and payload visibility | `tests/test_security.py` |
 | CLI exit codes and purge/list behavior | `tests/test_cli.py` |
 | CLI argument/environment precedence | `tests/test_cli.py::test_cli_argument_overrides_environment`, `test_environment_overrides_default` |
-| Body storage limits and truncation flags | `tests/test_gateway.py::test_storage_limit_sets_truncated_flags`; CLI indicator in `agent_gateway_pkg/core.py show` |
+| Body storage limits and truncation flags | `tests/test_gateway.py::test_storage_limit_sets_truncated_flags`; CLI indicator in `prompt_harbor/core.py show` |
 | Real HTTP JSON/SSE forwarding, auth handling, persistence | `tests/test_gateway.py::test_sse_capture_and_auth`, `test_json_transparent_forward` |
 | Upstream 400/401/429/500 and connection failure | `tests/test_gateway.py::test_upstream_error_status_preserved`, `test_upstream_connection_failure_returns_502` |
 | Upstream partial response detection | `tests/test_gateway.py::test_upstream_disconnect_records_partial_failure` |
