@@ -15,4 +15,4 @@
 | Upstream 400/401/429/500 and connection failure | `tests/test_gateway.py::test_upstream_error_status_preserved`, `test_upstream_connection_failure_returns_502` |
 | Upstream partial response detection | `tests/test_gateway.py::test_upstream_disconnect_records_partial_failure` |
 | Client cancellation and gateway survival | `tests/test_gateway.py::test_client_disconnect_does_not_crash_gateway` |
-| Remaining error, cancellation, truncation, and full CLI detail requirements | Blocked integration expansion pending loopback-enabled run; implementation evidence is reported without weakening assertions. |
+| Remaining error, cancellation, truncation, and full CLI detail requirements | Pending loopback-enabled run; this sandbox collected 50 tests but cannot bind `127.0.0.1`. |
