@@ -71,6 +71,11 @@ class Handler(BaseHTTPRequestHandler):
     try:self.clients.remove(client)
     except ValueError:pass
  def do_GET(self):
+  if self.path in ('/','/index.html'):
+   p=os.getenv('PROMPT_HARBOR_UI') or os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),'ui','index.html')
+   try: raw=open(p,'rb').read()
+   except OSError: self.send_error(404); return
+   self.send_response(200); self.send_header('Content-Type','text/html; charset=utf-8'); self.send_header('Content-Length',str(len(raw))); self.end_headers(); self.wfile.write(raw); return
   if self.path.startswith('/api/calls/'):
    try: cid=int(self.path.rsplit('/',1)[1])
    except: self.send_error(400); return

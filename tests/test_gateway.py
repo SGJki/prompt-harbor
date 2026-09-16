@@ -130,3 +130,13 @@ def test_client_disconnect_does_not_crash_gateway(tmp_path):
     try:
         s=socket.create_connection(('127.0.0.1',port)); s.sendall(b'POST /v1/responses HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\nContent-Type: application/json\r\n\r\n{}'); s.shutdown(socket.SHUT_RDWR); s.close(); time.sleep(.4); assert proc.poll() is None
     finally: proc.terminate(); proc.wait(); up.shutdown()
+
+def test_gateway_serves_audit_ui_and_overview_api(tmp_path):
+    up=ThreadingHTTPServer(('127.0.0.1',0),JsonUpstream); threading.Thread(target=up.serve_forever,daemon=True).start(); proc,port,db=run_gateway(tmp_path,up)
+    try:
+        c=http.client.HTTPConnection('127.0.0.1',port); c.request('GET','/'); r=c.getresponse(); body=r.read(); assert r.status==200 and b'text/html' in r.getheader('Content-Type').encode() and b'prompt harbor' in body; c.close()
+        c=http.client.HTTPConnection('127.0.0.1',port); c.request('POST','/v1/responses',b'{"model":"m"}'); r=c.getresponse(); assert r.status==200; r.read(); c.close()
+        deadline=time.time()+3
+        while time.time()<deadline and sqlite3.connect(db).execute('select count(*) from calls').fetchone()[0] < 1: time.sleep(.05)
+        c=http.client.HTTPConnection('127.0.0.1',port); c.request('GET','/api/overview'); r=c.getresponse(); payload=json.loads(r.read()); assert r.status==200 and len(payload['calls'])==1 and payload['calls'][0]['model']=='m'; c.close()
+    finally: proc.terminate(); proc.wait(); up.shutdown()
