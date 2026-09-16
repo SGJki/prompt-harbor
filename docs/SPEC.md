@@ -1,4 +1,4 @@
-# Agent LLM Gateway MVP 技术方案
+# PromptHarbor 技术方案
 
 ## 1. 目标
 
@@ -94,10 +94,10 @@ body 在 MVP 中直接存 SQLite。实现应设置单事件大小上限和数据
 建议命令：
 
 ```text
-agent-gateway start [--listen 127.0.0.1:8787] [--upstream https://api.openai.com]
-agent-gateway list [--since 2d] [--limit 50]
-agent-gateway show <event-id>
-agent-gateway purge
+uv run python -m prompt_harbor start [--listen 127.0.0.1:8787] [--upstream https://api.openai.com]
+uv run python -m prompt_harbor list [--since 2d] [--limit 50]
+uv run python -m prompt_harbor show <event-id>
+uv run python -m prompt_harbor purge
 ```
 
 `list` 显示时间、路径、模型、状态、耗时、输入/输出大小和 event ID。`show` 显示完整请求与响应内容，并明确标识流式响应和错误。
@@ -118,9 +118,9 @@ agent-gateway purge
 - MVP 不做 prompt 内容脱敏；完整内容只保存在本机 SQLite，按 2 天策略清理。
 - 不接受来自局域网或公网的连接。
 
-## 9. 未来 UI
+## 9. UI
 
-MVP 完成后再做独立前端，视觉上参考 `~/project/session-share`，但不复用其代码和数据模型。未来前端通过本项目自己的查询 API 读取 SQLite 事件。
+已提供独立无依赖页面 `ui/index.html`，参考 `~/project/session-share` 的深色侧栏和卡片式布局，包含 Overview、Calls、Sessions 导航及响应式布局，通过 `GET /api/overview` 读取数据。
 
 
 ## 10. 主键与关联约定
@@ -174,6 +174,6 @@ MVP 启用 `sessions`、`calls`、`attempts`、`payloads` 和 `usage`；`stream_
 
 ## 13. 当前实现约定
 
-实现代码位于 `agent_gateway_pkg/`，按配置、数据库、代理、headers、usage、保留策略和 CLI 分模块组织；`agent_gateway.py` 仅作为兼容入口。推荐运行方式为 `uv run python -m agent_gateway ...`。
+实现代码位于 `prompt_harbor/`，按配置、数据库、代理、headers、usage、保留策略和 CLI 分模块组织；`prompt_harbor.py` 提供命令行入口。推荐运行方式为 `uv run python -m prompt_harbor ...`。
 
-请求和响应默认最多各保存 10 MiB，可通过 `AGENT_GATEWAY_MAX_BODY` 调整。超过限制时只保存前缀，并将对应的 `request_truncated` 或 `response_truncated` 设为 1；`response_complete` 表示上游传输是否完整，和 HTTP 状态码无关。
+请求和响应默认最多各保存 10 MiB，可通过 `PROMPT_HARBOR_MAX_BODY` 调整。超过限制时只保存前缀，并将对应的 `request_truncated` 或 `response_truncated` 设为 1；`response_complete` 表示上游传输是否完整，和 HTTP 状态码无关。
