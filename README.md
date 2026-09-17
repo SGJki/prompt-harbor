@@ -30,11 +30,12 @@ body 默认最多保存 10 MiB，可用 `PROMPT_HARBOR_MAX_BODY` 调整；超过
 
 ## 网页审计台
 
-网关启动后，浏览器打开 `http://127.0.0.1:8787/` 即可使用内置审计页面（源文件为 `ui/index.html`，可用 `PROMPT_HARBOR_UI` 指定其他路径）。页面提供与 CLI 相同的查询能力：
+网关启动后，浏览器打开 `http://127.0.0.1:8787/` 即可使用内置审计台。前端位于 `ui/` 目录（`index.html` + `css/app.css` + `js/` 原生 ES 模块，无构建步骤），由网关托管目录内的 `.html/.css/.js` 静态资源；`PROMPT_HARBOR_UI` 仍可替换入口 HTML。页面提供与 CLI 相同的查询能力：
 
-- **Overview / Calls / Sessions** 按钮切换视图，分别对应 `GET /api/overview`、`/api/calls`、`/api/sessions`，展示调用列表、状态、耗时、成功率与会话信息；
-- **↻ Refresh** 按钮手动重新查询，页面还会通过 SSE（`/api/events`）在新调用完成时自动刷新，并以 5 秒轮询作为断线兜底；
-- 点击 Calls 中的记录可查看单次调用详情（`GET /api/calls/{id}`），返回的 headers 已脱除认证字段。
+- **Overview / Calls / Sessions** 切换视图，对应 `GET /api/overview`、`/api/calls`、`/api/sessions`；Sessions 显示每个会话的调用数，并可一键跳到该会话的调用列表；
+- **Calls** 支持按状态（成功/失败/进行中）、按会话和 model/endpoint 关键字筛选；
+- 点击调用查看详情（`GET /api/calls/{id}`）：请求/响应 body（JSON 自动美化、SSE 逐条展开）、脱除认证字段的 headers、usage、错误与截断标记；
+- 数据通过 SSE（`/api/events`）自动刷新，断线自动重连并以低频轮询兜底；网关不可达时页面显示错误横幅并可重试，**↻ Refresh** 可随时强制刷新。
 
 ## 测试
 

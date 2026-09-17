@@ -7,7 +7,9 @@ from datetime import datetime,timezone
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 from urllib.error import HTTPError
 from urllib.request import Request,urlopen
+from urllib.parse import unquote,urlparse
 DEFAULT_DB=DEFAULT_DB; DEFAULT_LISTEN=DEFAULT_LISTEN; DEFAULT_UPSTREAM=DEFAULT_UPSTREAM
+CONTENT_TYPES={'.html':'text/html; charset=utf-8','.css':'text/css; charset=utf-8','.js':'text/javascript; charset=utf-8'}
 def iso(ts=None): return datetime.fromtimestamp(ts,timezone.utc).isoformat() if ts else datetime.now(timezone.utc).isoformat()
 def db(path):
  c=sqlite3.connect(path,timeout=30); c.row_factory=sqlite3.Row; return c
@@ -79,7 +81,7 @@ class Handler(BaseHTTPRequestHandler):
   if self.path.startswith('/api/calls/'):
    try: cid=int(self.path.rsplit('/',1)[1])
    except: self.send_error(400); return
-   c=db(self.db_path); r=c.execute('SELECT c.*,a.request_headers_json,a.response_headers_json,p.request_body,p.response_body,u.input_tokens,u.output_tokens,u.total_tokens FROM calls c LEFT JOIN attempts a ON a.call_id=c.id LEFT JOIN payloads p ON p.attempt_id=a.id LEFT JOIN usage u ON u.attempt_id=a.id WHERE c.id=?',(cid,)).fetchone(); c.close()
+   c=db(self.db_path); r=c.execute('SELECT c.*,a.request_headers_json,a.response_headers_json,p.request_body,p.response_body,p.request_truncated,p.response_truncated,u.input_tokens,u.output_tokens,u.total_tokens FROM calls c LEFT JOIN attempts a ON a.call_id=c.id LEFT JOIN payloads p ON p.attempt_id=a.id LEFT JOIN usage u ON u.attempt_id=a.id WHERE c.id=?',(cid,)).fetchone(); c.close()
    if not r:self.send_error(404); return
    d=dict(r); d['request_headers_json']=json.loads(d['request_headers_json'] or '{}'); d['response_headers_json']=json.loads(d['response_headers_json'] or '{}')
    for key in ('request_body','response_body'):
@@ -93,14 +95,25 @@ class Handler(BaseHTTPRequestHandler):
     if self in self.clients:self.clients.remove(self)
    return
   if self.path not in ('/api/overview','/api/calls','/api/sessions'):
-   self.send_error(404); return
+   if self.path.startswith('/api/'): self.send_error(404); return
+   return self.static()
   c=db(self.db_path)
   calls=[dict(r) for r in c.execute('SELECT id,session_id,created_at,completed_at,endpoint,model,status,status_code,duration_ms,input_bytes,output_bytes,error_type FROM calls ORDER BY id DESC LIMIT 200')]
-  sessions=[dict(r) for r in c.execute('SELECT id,agent,started_at,last_seen_at,cwd,project_name FROM sessions ORDER BY id DESC')]
+  sessions=[dict(r) for r in c.execute('SELECT s.id,s.agent,s.started_at,s.last_seen_at,s.cwd,s.project_name,(SELECT COUNT(*) FROM calls x WHERE x.session_id=s.id) AS call_count FROM sessions s ORDER BY s.id DESC')]
   c.close(); payload={'calls':calls,'sessions':sessions}
   if self.path=='/api/calls': payload={'calls':calls}
   if self.path=='/api/sessions': payload={'sessions':sessions}
   raw=json.dumps(payload).encode(); self.send_response(200); self.send_header('Content-Type','application/json'); self.send_header('Content-Length',str(len(raw))); self.end_headers(); self.wfile.write(raw)
+ def static(self):
+  rel=unquote(urlparse(self.path).path).lstrip('/')
+  ext=os.path.splitext(rel)[1].lower()
+  if not rel or '..' in rel.replace('\\','/').split('/') or ext not in CONTENT_TYPES: self.send_error(404); return
+  root=os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),'ui')
+  p=os.path.normpath(os.path.join(root,rel))
+  if not p.startswith(root+os.sep): self.send_error(404); return
+  try: raw=open(p,'rb').read()
+  except OSError: self.send_error(404); return
+  self.send_response(200); self.send_header('Content-Type',CONTENT_TYPES[ext]); self.send_header('Content-Length',str(len(raw))); self.send_header('Cache-Control','no-cache'); self.end_headers(); self.wfile.write(raw)
  def log_message(self,*a):pass
 def purge(path):
  c=db(path);ids=[r[0] for r in c.execute("SELECT id FROM calls WHERE julianday(created_at) < julianday('now','-2 days')")]
