@@ -81,7 +81,9 @@ class Handler(BaseHTTPRequestHandler):
    except: self.send_error(400); return
    c=db(self.db_path); r=c.execute('SELECT c.*,a.request_headers_json,a.response_headers_json,p.request_body,p.response_body,u.input_tokens,u.output_tokens,u.total_tokens FROM calls c LEFT JOIN attempts a ON a.call_id=c.id LEFT JOIN payloads p ON p.attempt_id=a.id LEFT JOIN usage u ON u.attempt_id=a.id WHERE c.id=?',(cid,)).fetchone(); c.close()
    if not r:self.send_error(404); return
-   d=dict(r); d['request_headers_json']=json.loads(d['request_headers_json'] or '{}'); d['response_headers_json']=json.loads(d['response_headers_json'] or '{}'); d.pop('request_body',None); d.pop('response_body',None)
+   d=dict(r); d['request_headers_json']=json.loads(d['request_headers_json'] or '{}'); d['response_headers_json']=json.loads(d['response_headers_json'] or '{}')
+   for key in ('request_body','response_body'):
+    if isinstance(d.get(key), bytes): d[key]=d[key].decode('utf-8', errors='replace')
    raw=json.dumps(d).encode(); self.send_response(200); self.send_header('Content-Type','application/json'); self.send_header('Content-Length',str(len(raw))); self.end_headers(); self.wfile.write(raw); return
   if self.path=='/api/events':
    self.send_response(200); self.send_header('Content-Type','text/event-stream'); self.send_header('Cache-Control','no-cache'); self.send_header('Connection','keep-alive'); self.end_headers(); self.wfile.write(b'event: ready\ndata: {}\n\n'); self.wfile.flush(); self.clients.append(self)
