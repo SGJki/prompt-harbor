@@ -242,7 +242,71 @@ def test_sse_notifies_direct_sql_calls_and_sessions(tmp_path):
             )
         assert any(b'"resource":"calls"' in line for line in _read_sse_resource(response, "calls"))
         assert any(b'"resource":"sessions"' in line for line in _read_sse_resource(response, "sessions"))
+        with sqlite3.connect(path) as connection:
+            connection.execute("UPDATE sessions SET last_seen_at=? WHERE id=?", (canonical.iso(), sid))
+        assert any(b'"resource":"sessions"' in line for line in _read_sse_resource(response, "sessions"))
     finally:
         if events:
             events.close()
         stop_local(gateway, upstream)
+
+
+def test_notify_does_not_advance_cursor_past_concurrent_change(tmp_path):
+    path = tmp_path / "cursor.db"
+    canonical.init(str(path))
+    with sqlite3.connect(path) as connection:
+        connection.execute("INSERT INTO calls(created_at,status) VALUES(?,?)", (canonical.iso(), "running"))
+
+    class Client:
+        db_path = str(path)
+        _sse_change_id = 1
+        _sse_last_notified = set()
+
+        def _send_event(self, resource):
+            assert resource == "calls"
+            with sqlite3.connect(path) as connection:
+                connection.execute(
+                    "INSERT INTO sessions(agent,started_at,last_seen_at) VALUES(?,?,?)",
+                    ("concurrent", canonical.iso(), canonical.iso()),
+                )
+
+    handler = object.__new__(Handler)
+    handler.clients = [Client()]
+    handler._notify_resources({"calls"})
+    assert handler.clients[0]._sse_change_id == 1
+    with sqlite3.connect(path) as connection:
+        assert connection.execute("SELECT resource FROM change_log ORDER BY id DESC LIMIT 1").fetchone() == ("sessions",)
+
+
+def test_purge_cleans_change_log_by_retention_without_subscribers(tmp_path):
+    path = tmp_path / "change-log.db"
+    canonical.init(str(path))
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "INSERT INTO change_log(resource,changed_at) VALUES('calls',datetime('now','-3 days'))"
+        )
+        connection.execute("INSERT INTO change_log(resource,changed_at) VALUES('sessions',datetime('now'))")
+    assert canonical.purge(str(path), retention_days=1) == 0
+    with sqlite3.connect(path) as connection:
+        assert connection.execute("SELECT resource FROM change_log").fetchall() == [("sessions",)]
+
+
+def test_purge_preserves_change_log_after_slowest_active_cursor(tmp_path):
+    path = tmp_path / "active-change-log.db"
+    canonical.init(str(path))
+    with sqlite3.connect(path) as connection:
+        for resource in ("calls", "sessions", "calls"):
+            connection.execute("INSERT INTO change_log(resource,changed_at) VALUES(?,datetime('now'))", (resource,))
+
+    class Client:
+        db_path = str(path)
+        _sse_change_id = 1
+
+    previous = Handler.clients
+    Handler.clients = [Client()]
+    try:
+        assert canonical.purge(str(path), retention_days=1) == 0
+    finally:
+        Handler.clients = previous
+    with sqlite3.connect(path) as connection:
+        assert connection.execute("SELECT resource FROM change_log ORDER BY id").fetchall() == [("sessions",), ("calls",)]

@@ -62,12 +62,22 @@ def schema(connection):
         CREATE TABLE IF NOT EXISTS change_log(id INTEGER PRIMARY KEY AUTOINCREMENT,resource TEXT NOT NULL,changed_at TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS calls_created_idx ON calls(created_at);
         CREATE INDEX IF NOT EXISTS change_log_id_idx ON change_log(id);
+        CREATE INDEX IF NOT EXISTS change_log_changed_at_idx ON change_log(changed_at);
         CREATE TRIGGER IF NOT EXISTS calls_change_insert AFTER INSERT ON calls BEGIN INSERT INTO change_log(resource,changed_at) VALUES('calls',CURRENT_TIMESTAMP); END;
         CREATE TRIGGER IF NOT EXISTS calls_change_update AFTER UPDATE ON calls BEGIN INSERT INTO change_log(resource,changed_at) VALUES('calls',CURRENT_TIMESTAMP); END;
         CREATE TRIGGER IF NOT EXISTS calls_change_delete AFTER DELETE ON calls BEGIN INSERT INTO change_log(resource,changed_at) VALUES('calls',CURRENT_TIMESTAMP); END;
         CREATE TRIGGER IF NOT EXISTS sessions_change_insert AFTER INSERT ON sessions BEGIN INSERT INTO change_log(resource,changed_at) VALUES('sessions',CURRENT_TIMESTAMP); END;
-        CREATE TRIGGER IF NOT EXISTS sessions_change_update AFTER UPDATE OF agent,started_at,cwd,project_name,metadata_json ON sessions BEGIN INSERT INTO change_log(resource,changed_at) VALUES('sessions',CURRENT_TIMESTAMP); END;
         CREATE TRIGGER IF NOT EXISTS sessions_change_delete AFTER DELETE ON sessions BEGIN INSERT INTO change_log(resource,changed_at) VALUES('sessions',CURRENT_TIMESTAMP); END;
+        """
+    )
+    # Recreate this trigger so existing databases receive the complete mutable
+    # column set, including last_seen_at added after the original schema.
+    connection.executescript(
+        """
+        DROP TRIGGER IF EXISTS sessions_change_update;
+        CREATE TRIGGER sessions_change_update
+        AFTER UPDATE OF agent,started_at,last_seen_at,cwd,project_name,metadata_json ON sessions
+        BEGIN INSERT INTO change_log(resource,changed_at) VALUES('sessions',CURRENT_TIMESTAMP); END;
         """
     )
     if connection.execute("PRAGMA user_version").fetchone()[0] < 1:
@@ -278,9 +288,6 @@ class Handler(BaseHTTPRequestHandler):
                 for resource in sorted(resources):
                     client._send_event(resource)
                 client._sse_last_notified = getattr(client, "_sse_last_notified", set()) | set(resources)
-                connection = db(self.db_path, self.db_timeout)
-                client._sse_change_id = connection.execute("SELECT COALESCE(MAX(id), 0) FROM change_log").fetchone()[0]
-                connection.close()
             except Exception:
                 try:
                     self.clients.remove(client)
@@ -583,6 +590,22 @@ def purge(path, retention_days=DEFAULT_RETENTION_DAYS, timeout=DEFAULT_DB_TIMEOU
     from .database import purge_calls
     connection = db(path, timeout)
     count = purge_calls(connection, retention_days)
+    cursors = [
+        getattr(client, "_sse_change_id")
+        for client in list(getattr(Handler, "clients", []))
+        if os.fspath(getattr(client, "db_path", "")) == os.fspath(path)
+        and isinstance(getattr(client, "_sse_change_id", None), int)
+    ]
+    if cursors:
+        # Every active client has consumed all entries up to its cursor. Keep
+        # anything newer than the slowest client so polling cannot skip it.
+        connection.execute("DELETE FROM change_log WHERE id <= ?", (min(cursors),))
+    else:
+        # With no subscribers, retention bounds the append-only log on disk.
+        connection.execute(
+            "DELETE FROM change_log WHERE julianday(changed_at) < julianday('now', ?)",
+            (f"-{retention_days} days",),
+        )
     connection.commit()
     connection.close()
     return count
