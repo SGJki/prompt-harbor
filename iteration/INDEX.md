@@ -14,6 +14,7 @@
 | iteration-8 | `closed` | 安全审查修复：权限收紧失败终止、重定向响应隔离、认证字典及时清理、上游端口校验和规范化 origin 告警。 | [PROGRESS](./iteration-8/PROGRESS.md) · [BLOCKED](./iteration-8/BLOCKED.md) |
 | iteration-9 | `closed` | 审查最新两个 commit：OCR 选集、规则核对与 Codex 复核。 | [PROGRESS](./iteration-9/PROGRESS.md) · [BLOCKED](./iteration-9/BLOCKED.md) |
 | iteration-10 | `closed` | 前端增量重构：Host 白名单与安全响应头、写接口 CSRF 防御、INI 保注释写回、配置来源锁定、CSS token 与可访问性。 | [PROGRESS](./iteration-10/PROGRESS.md) · [BLOCKED](./iteration-10/BLOCKED.md) |
+| iteration-11 | `closed` | 修复 CR blocking：托管 sidecar 地址保持、token 重启语义、startup secret 防止回写及回归测试。 | [PROGRESS](./iteration-11/PROGRESS.md) · [BLOCKED](./iteration-11/BLOCKED.md) |
 
 ## Maintenance
 

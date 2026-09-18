@@ -186,6 +186,7 @@ class Handler(BaseHTTPRequestHandler):
     config_path = "prompt-harbor.ini"
     config_settings = {}
     config_sources = {}
+    sidecar_managed = False
     gateway_server = None
 
     @staticmethod
@@ -797,17 +798,21 @@ def _update_runtime_config(payload):
         if value is not None and not isinstance(value, (str, int, float, bool)):
             raise ConfigError(f"{field} has invalid value: {value!r}")
         values[field] = value
-    settings = write_config(Handler.config_path, values)
+    persist_fields = set(CONFIG_FIELDS)
+    token_source = Handler.config_sources.get("sidecar_token", "default")
+    if "sidecar_token" not in updates and token_source in {"cli", "env", "default"}:
+        # Do not materialize a secret supplied only through process startup
+        # overrides while persisting an unrelated UI change.
+        persist_fields.discard("sidecar_token")
+    settings = write_config(Handler.config_path, values, persist_fields=persist_fields)
     Handler.config_settings = settings_values(settings)
     Handler.config_sources = {
-        field: (source if source in {"cli", "env"} else "ini")
+        field: (source if source in {"cli", "env"} or field not in persist_fields else "ini")
         for field, source in Handler.config_sources.items()
     }
     _apply_runtime_settings(settings)
-    if "sidecar_url" in updates:
+    if "sidecar_url" in updates and not Handler.sidecar_managed:
         Handler.sidecar_url = settings.sidecar_url
-    if "sidecar_token" in updates:
-        Handler.sidecar_token = settings.sidecar_token
     restart_required = sorted(field for field in updates if CONFIG_FIELDS[field]["restart_required"])
     public = {
         field: {"value": None if CONFIG_FIELDS[field].get("secret") else getattr(settings, field),
@@ -957,6 +962,7 @@ def main(argv=None):
         print("pi-ai sidecar unavailable:", exc, file=sys.stderr)
     Handler.clients = []
     Handler.db_path = path; Handler.upstream = settings.upstream; Handler.security_warnings = settings.upstream_warnings; Handler.sidecar_url = configured_sidecar; Handler.sidecar_token = settings.sidecar_token; Handler.session_id = session_id
+    Handler.sidecar_managed = manager.process is not None
     Handler.db_timeout = settings.db_timeout; Handler.capture_max_body = settings.max_body; Handler.upstream_timeout = settings.upstream_timeout; Handler.sidecar_timeout = settings.sidecar_timeout; Handler.sse_keepalive = settings.sse_keepalive; Handler.api_call_limit = settings.api_call_limit; Handler.ui_path = settings.ui_path
     Handler.config_path = settings.config_path
     Handler.config_settings = settings_values(settings)

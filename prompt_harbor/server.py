@@ -20,6 +20,7 @@ def serve(listen, upstream, database, sidecar_url=None, sidecar_token=None, rete
     Handler.security_warnings = warnings
     Handler.sidecar_url = sidecar_url
     Handler.sidecar_token = sidecar_token
+    Handler.sidecar_managed = False
     Handler.session_id = cur.lastrowid
     Handler.db_timeout = db_timeout
     Handler.clients = []

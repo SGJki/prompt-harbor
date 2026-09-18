@@ -120,7 +120,7 @@ CONFIG_FIELDS = {
     "ui_path": {"section": "gateway", "key": "ui_path", "kind": "optional", "restart_required": False},
     "sidecar_url": {"section": "sidecar", "key": "url", "kind": "optional", "restart_required": False},
     "sidecar_command": {"section": "sidecar", "key": "command", "kind": "optional", "restart_required": True},
-    "sidecar_token": {"section": "sidecar", "key": "token", "kind": "optional", "restart_required": False, "secret": True},
+    "sidecar_token": {"section": "sidecar", "key": "token", "kind": "optional", "restart_required": True, "secret": True},
 }
 
 CLI_FIELD_NAMES = {"sidecar_url": "pi_sidecar_url", "sidecar_command": "pi_sidecar_command", "sidecar_token": "pi_sidecar_token"}
@@ -261,7 +261,7 @@ def validate_values(values: dict[str, object]) -> Settings:
     return load_settings(cli)
 
 
-def write_config(path: str, values: dict[str, object]) -> Settings:
+def write_config(path: str, values: dict[str, object], *, persist_fields: Optional[set[str]] = None) -> Settings:
     """Validate and atomically persist editable settings to an INI file."""
     settings = validate_values(values)
     try:
@@ -271,7 +271,7 @@ def write_config(path: str, values: dict[str, object]) -> Settings:
         original = ""
     except OSError as exc:
         raise ConfigError(f"cannot read configuration file {path}: {exc}") from exc
-    text = _update_ini_text(original, settings)
+    text = _update_ini_text(original, settings, persist_fields)
     directory = os.path.dirname(os.path.abspath(path)) or "."
     temporary = None
     try:
@@ -297,7 +297,7 @@ _SECTION_RE = re.compile(r"^\s*\[([^]]+)\]\s*(?:\r?\n|$)")
 _KEY_RE = re.compile(r"^(\s*)([^=:#\s]+)(\s*[=:]\s*)(.*?)(\r?\n|$)$")
 
 
-def _update_ini_text(original: str, settings: Settings) -> str:
+def _update_ini_text(original: str, settings: Settings, persist_fields: Optional[set[str]] = None) -> str:
     """Edit managed keys in-place while retaining comments and unknown lines."""
     lines = original.splitlines(keepends=True)
     if not lines:
@@ -314,6 +314,8 @@ def _update_ini_text(original: str, settings: Settings) -> str:
             locations[(current, key.group(2).strip().lower())] = index
     additions: dict[str, list[str]] = {}
     for field, spec in CONFIG_FIELDS.items():
+        if persist_fields is not None and field not in persist_fields:
+            continue
         section = spec["section"].lower()
         key = spec["key"]
         value = getattr(settings, field)

@@ -30,7 +30,7 @@ def test_runtime_config_update_redacts_secret_and_reports_restart_fields(tmp_pat
         Handler.config_settings = settings_values(Settings())
         Handler.gateway_server = None
         result = update_runtime_config({"gateway": {"max_body": "2048", "listen": "127.0.0.1:9898"}, "sidecar": {"token": "secret"}})
-        assert result["restart_required"] == ["listen"]
+        assert result["restart_required"] == ["listen", "sidecar_token"]
         assert result["fields"]["sidecar_token"]["value"] is None
         assert result["fields"]["sidecar_token"]["configured"] is True
         assert "local-secret" not in json.dumps(result)
