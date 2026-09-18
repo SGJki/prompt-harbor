@@ -3,7 +3,7 @@ from http.server import ThreadingHTTPServer
 from .proxy import Handler
 from .core import db, init, iso
 
-def serve(listen, upstream, database):
+def serve(listen, upstream, database, sidecar_url=None, sidecar_token=None):
     host, port = listen.rsplit(':', 1)
     init(database)
     c = db(database)
@@ -15,5 +15,7 @@ def serve(listen, upstream, database):
     c.close()
     Handler.db_path = database
     Handler.upstream = upstream
+    Handler.sidecar_url = sidecar_url
+    Handler.sidecar_token = sidecar_token
     Handler.session_id = cur.lastrowid
     return ThreadingHTTPServer((host, int(port)), Handler)

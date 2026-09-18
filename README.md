@@ -13,6 +13,25 @@ OPENAI_BASE_URL=http://127.0.0.1:8787/v1 codex
 
 配置优先级为 CLI 参数、环境变量（`PROMPT_HARBOR_DB`、`PROMPT_HARBOR_LISTEN`、`PROMPT_HARBOR_UPSTREAM`）、默认值。默认监听 `127.0.0.1:8787`，上游为 `https://api.openai.com`。
 
+## pi-ai sidecar
+
+网关可以通过可选的 Node sidecar 提供 `pi-messages` 语义端点。现有 `/v1/*` 透明路径不依赖 Node。使用已经运行的 sidecar：
+
+```bash
+prompt-harbor --pi-sidecar-url http://127.0.0.1:8790 start
+```
+
+也可以让网关管理 sidecar 子进程：
+
+```bash
+PI_AI_SIDECAR_FIXTURE=1 prompt-harbor \
+  --pi-sidecar-command 'node sidecar/server.mjs' start
+```
+
+真实 provider 运行前需要在 `sidecar/` 安装依赖，并确保 pi-ai 已构建。上游 provider 的 API key 由 pi-ai 环境变量或 credential store 管理。`PROMPT_HARBOR_MESSAGES_TOKEN` 可为 `/messages`、`/models` 和 sidecar 之间增加本地共享 token；客户端 Authorization 不会作为 provider 凭证转发，也不会写入 SQLite。
+
+sidecar 提供 `GET /health`、`GET /models` 和 `POST /messages`。模型 ID 使用带 provider 前缀的形式，例如 `anthropic/claude-sonnet-4-5`。网关没有配置 sidecar 时，`/messages` 返回 503，OpenAI 透明代理仍可使用。
+
 ## 查询
 
 安装为本地命令后直接调用 `prompt-harbor`，无需再加 `uv run`：

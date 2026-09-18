@@ -1,0 +1,11 @@
+{
+  "name": "prompt-harbor-pi-sidecar",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "node --check server.mjs"
+  },
+  "dependencies": {
+    "@earendil-works/pi-ai": "file:../../pi/packages/ai"
+  }
+}
