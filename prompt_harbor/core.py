@@ -292,7 +292,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.flush()
             state.finish()
             record["response_complete"] = state.complete or record["status"] >= 400
-            if state.terminal_type == "done" and state.protocol_error is None:
+            if record["status"] >= 400:
+                record["state"], record["error_type"] = "failed", "sidecar_http"
+                record["error_message"] = "sidecar HTTP error"
+            elif state.terminal_type == "done" and state.protocol_error is None:
                 record["state"] = "succeeded"
             elif state.terminal_type == "done":
                 record["state"], record["error_type"], record["error_message"] = "failed", "pi_protocol", state.protocol_error
@@ -301,8 +304,6 @@ class Handler(BaseHTTPRequestHandler):
                 record["error_message"] = state.error_message or state.terminal_reason or "pi-ai error"
             elif state.protocol_error:
                 record["state"], record["error_type"], record["error_message"] = "failed", "pi_protocol", state.protocol_error
-            elif record["status"] >= 400:
-                record["state"], record["error_type"], record["error_message"] = "failed", "sidecar_http", "sidecar HTTP error"
             else:
                 record["state"], record["error_type"], record["error_message"] = "failed", "upstream_incomplete", "pi-messages stream ended without a terminal event"
             self.close_connection = True
@@ -325,15 +326,48 @@ class Handler(BaseHTTPRequestHandler):
     def _safe_pi_body(parsed, original):
         if not isinstance(parsed, dict):
             return original
-        safe = dict(parsed)
-        options = safe.get("options")
-        if isinstance(options, dict):
-            options = dict(options)
-            for key in ("apiKey", "api_key", "api-key", "headers", "authorization", "proxy-authorization", "accessToken", "refreshToken", "credential", "env", "fetch", "signal", "onPayload", "onResponse", "transformHeaders"):
-                options.pop(key, None)
-            safe["options"] = options
-        for key in ("apiKey", "api_key", "authorization", "accessToken", "refreshToken", "credential"):
-            safe.pop(key, None)
+
+        sensitive_keys = {
+            "access-token",
+            "access_token",
+            "accesstoken",
+            "api-key",
+            "apikey",
+            "api_key",
+            "authorization",
+            "cookie",
+            "credential",
+            "credentials",
+            "env",
+            "fetch",
+            "headers",
+            "onpayload",
+            "onresponse",
+            "proxy-authorization",
+            "proxy_authorization",
+            "refresh-token",
+            "refresh_token",
+            "refreshtoken",
+            "set-cookie",
+            "signal",
+            "transformheaders",
+            "x-api-key",
+            "x-auth-token",
+            "x-goog-api-key",
+        }
+
+        def scrub(value):
+            if isinstance(value, dict):
+                return {
+                    key: scrub(item)
+                    for key, item in value.items()
+                    if not isinstance(key, str) or key.lower() not in sensitive_keys
+                }
+            if isinstance(value, list):
+                return [scrub(item) for item in value]
+            return value
+
+        safe = scrub(parsed)
         try:
             return json.dumps(safe, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         except (TypeError, ValueError):

@@ -53,6 +53,14 @@ class PiSidecar(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        if type(self).mode == "http_error_invalid_sse":
+            body = b"data: {invalid-json}\n\n"
+            self.send_response(503)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("X-Pi-Model", request["model"])
@@ -164,7 +172,7 @@ def test_pi_messages_strips_provider_credentials_from_body(tmp_path):
     process, port, database = start_gateway(tmp_path, f"http://127.0.0.1:{upstream.server_port}")
     try:
         connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
-        connection.request("POST", "/messages", b'{"model":"fixture/model","context":{"messages":[]},"options":{"apiKey":"SECRET","headers":{"X-Secret":"SECRET"}}}')
+        connection.request("POST", "/messages", b'{"model":"fixture/model","headers":{"Authorization":"Bearer SECRET","X-Secret":"SECRET"},"proxy-authorization":"Basic SECRET","context":{"messages":[],"metadata":{"headers":{"X-Nested-Secret":"SECRET"}}},"options":{"apiKey":"SECRET","headers":{"X-Secret":"SECRET"}}}')
         response = connection.getresponse()
         response.read()
         connection.close()
@@ -174,13 +182,16 @@ def test_pi_messages_strips_provider_credentials_from_body(tmp_path):
         assert b"SECRET" not in request_body
         assert "apiKey" not in PiSidecar.last_request.get("options", {})
         assert "headers" not in PiSidecar.last_request.get("options", {})
+        assert "headers" not in PiSidecar.last_request
+        assert "proxy-authorization" not in PiSidecar.last_request
+        assert "headers" not in PiSidecar.last_request["context"].get("metadata", {})
     finally:
         process.terminate()
         process.wait(timeout=3)
         upstream.shutdown()
 
 
-@pytest.mark.parametrize("mode,error_type", [("error", "pi_error"), ("http_error", "sidecar_http")])
+@pytest.mark.parametrize("mode,error_type", [("error", "pi_error"), ("http_error", "sidecar_http"), ("http_error_invalid_sse", "sidecar_http")])
 def test_pi_messages_failure_is_recorded(tmp_path, mode, error_type):
     PiSidecar.mode = mode
     upstream = ThreadingHTTPServer(("127.0.0.1", 0), PiSidecar)
@@ -196,8 +207,10 @@ def test_pi_messages_failure_is_recorded(tmp_path, mode, error_type):
         assert row[0] == "failed" and row[1] == error_type
         if mode == "error":
             assert response.status == 200 and b"provider failed" in body and row[2] == 200
-        else:
+        elif mode == "http_error":
             assert response.status == 503 and b"provider_down" in body and row[2] == 503
+        else:
+            assert response.status == 503 and b"invalid-json" in body and row[2] == 503
     finally:
         process.terminate()
         process.wait(timeout=3)
