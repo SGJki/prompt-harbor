@@ -16,3 +16,10 @@
 ### Goal-Driven Execution
 
 - Use `uv run pytest -q` as the regression check. If it fails because loopback is unavailable or due to another clear sandbox limitation, retry the command outside the sandbox before reporting the problem. Only when loopback remains unavailable after that retry, perform the documented manual local-fixture verification and report the environment limitation.
+
+### Iteration Tracking
+
+- Track project work under `iteration/iteration-{i}/`; do not treat root-level progress files as the active iteration record.
+- Before starting work, scan every `iteration/iteration-{i}/` directory and follow the highest-numbered iteration whose records do not contain `状态：closed`.
+- An iteration is active until both its `PROGRESS.md` and `BLOCKED.md` contain `状态：closed`; closed iterations remain as history and must not be deleted as cleanup.
+- When no unclosed iteration exists, create the next numbered iteration and put its progress and blocked records there.

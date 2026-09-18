@@ -1,6 +1,6 @@
 # Test coverage matrix
 
-当前验收基线：`uv run pytest --collect-only -q` 为 **72 tests collected**；沙箱外 `uv run pytest -q` 为 **72 passed, 0 skipped, 0 xfailed**。
+当前验收基线（2026-09-18）：`uv run pytest --collect-only -q` 为 **77 tests collected**；loopback-enabled 环境中的 `uv run pytest -q` 为 **77 passed, 0 skipped, 0 xfailed**。当前沙箱禁止 loopback，因此本次回归按项目规则在沙箱外完成。
 
 | SPEC / review area | Concrete tests |
 |---|---|
@@ -18,10 +18,10 @@
 | Startup cleanup after restart using same DB | `tests/test_retention.py::test_startup_purge_cleans_expired_chain_on_restart` |
 | Body limit `limit-1`, `limit`, `limit+1`, online bytes and flags | `tests/test_boundaries.py::test_request_limit_boundaries_preserve_online_body_and_store_prefix`, `test_response_limit_boundaries_preserve_online_bytes_and_store_prefix`, `tests/test_gateway.py::test_exact_body_limit_preserves_complete_request_and_response`, `test_storage_limit_sets_truncated_flags` |
 | API bad ID and unknown API path | `tests/test_boundaries.py::test_api_id_and_unknown_paths_have_explicit_errors` |
-| pi-messages sidecar forwarding, usage and failure lifecycle | `tests/test_pi_messages.py` (同期工作区新增测试) |
+| pi-messages sidecar forwarding, usage and failure lifecycle | `tests/test_pi_messages.py` |
 | CLI metadata without body | `tests/test_cli.py::test_list_has_metadata_columns`, `tests/test_security.py::test_list_does_not_print_body` |
 | Detail API, static resources and traversal protection | `tests/test_ui_static.py` all four tests; `tests/test_security.py::test_show_prints_payload`, `test_show_headers_are_json` |
 | Known invalid configuration behavior | `tests/test_boundaries.py::test_invalid_max_body_is_known_defect_but_gateway_process_survives` records current `ValueError` while requiring process survival |
 | Security and payload preservation | `tests/test_security.py` all five tests; `tests/test_schema.py::test_sensitive_header_names_all_redacted` |
 
-Reverse validation evidence for notification, header passthrough, cleanup and cancellation is recorded in `PROGRESS.md`; defects and untested follow-up scope are in `TEST_REVIEW_FOLLOWUP.md`.
+Reverse validation evidence for notification, header passthrough, cleanup and cancellation is recorded in `iteration/iteration-2/PROGRESS.md`; defects and untested follow-up scope are in `TEST_REVIEW_FOLLOWUP.md`.

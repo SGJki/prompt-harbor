@@ -4,7 +4,7 @@
 
 构建一个运行在本机的透明网关，观察 Codex CLI 发往 OpenAI API 的完整 request，以及 OpenAI 返回给 Codex 的完整 response。网关应尽量不改变 Codex 的行为，尤其是流式输出的时序和内容。
 
-## 2. MVP 范围
+## 2. 当前范围（2026-09-18）
 
 ### 支持
 
@@ -15,21 +15,22 @@
 - SSE 流式响应
 - 本机单用户运行
 - SQLite 本地存储
-- 完整保存 prompt、response、请求/响应头（认证信息除外）
+- 在保存上限内保存 prompt、response、请求/响应头（认证信息除外），超限时保留前缀并设置截断标记
 - 请求头中的 `Authorization` 透传到上游，但不写入数据库或日志
-- 事件按时间保留 2 天，并自动清理过期数据
-- 纯文字 CLI：启动、查看调用列表、查看详情、清理数据
+- 数据按时间保留 2 天；启动和显式 `purge` 会清理过期数据
+- CLI：启动、查看调用列表、查看详情、清理数据
+- 可选 pi-ai sidecar：`/messages`、`/models`、`/health`
+- 内置无构建步骤的 Web 审计台：Overview、Calls、Sessions 和实时失效通知
 
 ### 不支持
 
-- Claude Code、pi
+- Claude Code 的 Anthropic Messages/SSE 适配
 - 多用户、远程部署、Docker 部署
-- Web UI
 - 请求修改
 - 自动重试
 - 模型切换
 - 路由和负载均衡
-- MVP 阶段的数据脱敏
+- 不对 prompt 内容做脱敏；完整内容只保存在本机 SQLite
 
 ## 3. 使用方式
 
@@ -57,37 +58,25 @@ https://api.openai.com/v1/responses
 
 ## 4. 核心行为
 
-1. 接收 Codex 请求并生成唯一 event ID。
+1. 接收 Codex 请求并创建 `call`、`attempt` 和 `payload` 记录。
 2. 记录请求到达时间、HTTP 方法、路径、请求头（排除认证信息）、请求 body 和流式标记。
 3. 将请求转发到 OpenAI。
 4. 对普通响应直接转发；对 SSE 响应边读取边写回客户端，同时复制响应内容用于记录。
-5. 记录状态码、响应头（排除认证信息）、完整 response body、首字节时间、完成时间和错误信息。
+5. 记录状态码、响应头（排除认证信息）、受保存上限约束的 response body、首字节时间、完成时间和错误信息；超限时设置截断标记。
 6. 上游连接中断、客户端取消、网关异常都要留下可查询的失败事件。
-7. 每次启动和定期运行清理任务，删除超过 2 天的事件及其 body。
+7. 每次启动和显式执行 `purge` 时删除超过 2 天的调用及其关联记录；后台周期清理尚未实现，见 `docs/TEST_REVIEW_FOLLOWUP.md`。
 
 ## 5. 数据模型
 
-### events
+SQLite 使用五张表，关联由应用层维护，不创建外键约束：
 
-- `id`：UUID
-- `created_at`
-- `started_at`
-- `first_byte_at`：可为空
-- `completed_at`：可为空
-- `method`
-- `path`
-- `model`：从请求 JSON 提取，可为空
-- `stream`：布尔值
-- `status_code`：可为空
-- `request_headers_json`
-- `response_headers_json`
-- `request_body`
-- `response_body`
-- `error`
-- `bytes_in`
-- `bytes_out`
+- `sessions`：网关启动创建的会话及工作目录元数据；同一进程内的调用共享该 `session_id`。
+- `calls`：客户端请求的状态、provider/API family、endpoint、model、流式标记、状态码、耗时和错误。
+- `attempts`：每个调用的上游尝试、脱敏 headers、上游 URL、状态和字节统计。
+- `payloads`：请求/响应 body、content type、完整性和截断标记。
+- `usage`：输入/输出/总 token 及原始 usage JSON。
 
-body 在 MVP 中直接存 SQLite。实现应设置单事件大小上限和数据库大小保护，避免异常响应耗尽磁盘。
+body 直接存 SQLite。请求和响应默认各保存最多 10 MiB，超出部分只保留前缀并设置截断标记。
 
 ## 6. CLI
 
@@ -95,12 +84,12 @@ body 在 MVP 中直接存 SQLite。实现应设置单事件大小上限和数据
 
 ```text
 uv run python -m prompt_harbor start [--listen 127.0.0.1:8787] [--upstream https://api.openai.com]
-uv run python -m prompt_harbor list [--since 2d] [--limit 50]
-uv run python -m prompt_harbor show <event-id>
+uv run python -m prompt_harbor list
+uv run python -m prompt_harbor show <call-id>
 uv run python -m prompt_harbor purge
 ```
 
-`list` 显示时间、路径、模型、状态、耗时、输入/输出大小和 event ID。`show` 显示完整请求与响应内容，并明确标识流式响应和错误。
+`list` 显示时间、路径、模型、状态、耗时、输入/输出大小和 call ID。`show` 显示完整请求与响应内容，并明确标识流式响应和错误。
 
 运行时配置支持当前目录的 `prompt-harbor.ini`，也可通过 `--config` 或 `PROMPT_HARBOR_CONFIG` 指定文件。覆盖优先级为 CLI 参数、环境变量、INI 文件、内置默认值。配置文件使用 `[gateway]` 和 `[sidecar]` 两个 section；默认值和可配置项见 `prompt-harbor.ini.example`。
 
@@ -115,14 +104,14 @@ uv run python -m prompt_harbor purge
 
 ## 8. 安全与限制
 
-- 只绑定 `127.0.0.1`。
+- 设计上只绑定 `127.0.0.1`；当前 `--listen` 尚未拒绝其他 host，见 `docs/TEST_REVIEW_FOLLOWUP.md`。
 - 不持久化 API key，不在 CLI 输出 API key。
-- MVP 不做 prompt 内容脱敏；完整内容只保存在本机 SQLite，按 2 天策略清理。
-- 不接受来自局域网或公网的连接。
+- 不做 prompt 内容脱敏；完整内容只保存在本机 SQLite，按 2 天策略清理。
+- 默认监听 loopback；由于 `--listen` 尚未强制校验，局域网或公网暴露风险仍是 pending。
 
 ## 9. UI
 
-已提供独立无依赖页面 `ui/index.html`，参考 `~/project/session-share` 的深色侧栏和卡片式布局，包含 Overview、Calls、Sessions 导航及响应式布局，通过 `GET /api/overview` 读取数据。
+已提供独立无依赖页面 `ui/index.html`，由网关托管。页面通过 `GET /api/overview`、`/api/calls`、`/api/sessions` 和 `GET /api/calls/{id}` 查询数据，并通过 `GET /api/events` 接收 `invalidate` 事件；完整契约和验收项见 `docs/UI_SPEC.md`。
 
 
 ## 10. 主键与关联约定
@@ -172,7 +161,7 @@ erDiagram
     STREAM_CHUNKS { integer id PK integer attempt_id }
 ```
 
-MVP 启用 `sessions`、`calls`、`attempts`、`payloads` 和 `usage`；`stream_chunks` 作为后续扩展，默认不逐 chunk 持久化。
+当前启用 `sessions`、`calls`、`attempts`、`payloads` 和 `usage`；`stream_chunks` 作为后续扩展，默认不逐 chunk 持久化。
 
 ## 13. 当前实现约定
 

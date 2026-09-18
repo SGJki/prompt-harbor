@@ -1,6 +1,8 @@
 # pi-ai 适配技术方案
 
-状态：提案
+状态：Phase 0-2 已实现（截至 2026-09-18）；Phase 3/4 仍是后续工作。
+
+现状证据：`/messages`、`/models`、`/health`、可选托管 sidecar、生命周期持久化和 fake sidecar 回归测试均已存在；真实 provider smoke、完整 Node 单元测试、迁移和更高层语义能力仍待补齐。
 
 日期：2026-09-18
 
