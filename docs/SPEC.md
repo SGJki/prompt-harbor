@@ -17,6 +17,9 @@
 - SQLite 本地存储
 - 在保存上限内保存 prompt、response、请求/响应头（认证信息除外），超限时保留前缀并设置截断标记
 - 请求头中的 `Authorization` 透传到上游，但不写入数据库或日志
+- `upstream` 必须是 HTTPS；仅 loopback HTTP 可用于本地 fixture，并在 CLI/UI 告警
+- 网关不跟随上游 HTTP 重定向，避免 Authorization 被转发到重定向目标
+- SQLite 数据库初始化为 0600；API key 在转发期间仍存在于网关进程内存中，宿主机进程安全不由网关解决
 - 数据按时间保留 2 天；启动、显式 `purge` 和后台周期任务会清理过期数据
 - CLI：启动、查看调用列表、查看详情、清理数据
 - 可选 pi-ai sidecar：`/messages`、`/models`、`/health`

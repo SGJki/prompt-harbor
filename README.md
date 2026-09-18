@@ -2,6 +2,11 @@
 
 本地透明转发 Codex CLI 的 OpenAI API 请求，并将请求、响应、SSE、耗时、状态和 token 记录到 SQLite。Authorization 仅透传到上游，永不写入数据库或 CLI 输出。
 
+安全边界：`upstream` 必须使用 HTTPS；仅允许 `127.0.0.1`、`::1` 或 `localhost` 的 HTTP
+作为本地 fixture。自定义上游会在启动输出和网页 Overview 中告警，因为 Authorization 会被
+透明转发给该地址。网关拒绝跟随上游重定向，避免认证头被带到重定向目标；SQLite 数据库初始化
+为仅当前用户可读写。API key 仍会在网关进程内存中短暂存在，因此应保护网关进程和宿主机。
+
 ## 安装与启动
 
 ```bash

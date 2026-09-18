@@ -40,7 +40,9 @@ export function overviewView(state) {
   const sessions = state.sessions;
   const ok = calls.filter(c => c.status_code >= 200 && c.status_code < 400).length;
   const rate = calls.length ? Math.round((ok / calls.length) * 100) : 0;
-  return `<div class="cards">
+  const warnings = (state.securityWarnings || []).map(warning => `<div class="warn">${esc(warning)}</div>`).join('');
+  return `${warnings ? `<div class="panel security-warning"><h3>Security warning</h3>${warnings}</div>` : ''}
+<div class="cards">
 <div class="card">Total calls<b>${calls.length}</b></div>
 <div class="card">Success rate<b>${rate}%</b></div>
 <div class="card">Sessions<b>${sessions.length}</b></div>

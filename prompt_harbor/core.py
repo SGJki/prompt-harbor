@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.error import HTTPError
 from urllib.parse import unquote, urlparse
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from .config import (
     DEFAULT_DB,
@@ -29,6 +29,7 @@ from .config import (
     ConfigError,
     load_settings,
     validate_listen,
+    validate_upstream,
 )
 from .headers import sanitize
 from .pi_messages import PiMessagesState, normalize_usage, split_model_id
@@ -39,6 +40,29 @@ HOP_BY_HOP = {"transfer-encoding", "connection", "content-length"}
 DEFAULT_DB = DEFAULT_DB
 DEFAULT_LISTEN = DEFAULT_LISTEN
 DEFAULT_UPSTREAM = DEFAULT_UPSTREAM
+
+
+class NoRedirectHandler(HTTPRedirectHandler):
+    """Do not carry credentials to an URL selected by an upstream redirect."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+UPSTREAM_OPENER = build_opener(NoRedirectHandler)
+
+
+def open_url(request, timeout):
+    try:
+        return UPSTREAM_OPENER.open(request, timeout=timeout)
+    finally:
+        # urllib keeps request headers on the Request object while the
+        # response is consumed; drop credential fields as soon as the
+        # connection has been established or failed.
+        for header_map in (getattr(request, "headers", {}), getattr(request, "unredirected_hdrs", {})):
+            for key in list(header_map):
+                if key.lower() in {"authorization", "proxy-authorization"}:
+                    del header_map[key]
 
 
 def iso(ts=None):
@@ -89,6 +113,12 @@ def init(path, timeout=DEFAULT_DB_TIMEOUT):
     schema(connection)
     connection.commit()
     connection.close()
+    # Audit payloads can contain sensitive prompts; keep the local database
+    # private even when the process inherits a permissive umask.
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
 
 
 def headers(header_map):
@@ -142,6 +172,7 @@ class Handler(BaseHTTPRequestHandler):
     sse_keepalive = DEFAULT_SSE_KEEPALIVE
     api_call_limit = DEFAULT_API_CALL_LIMIT
     ui_path = None
+    security_warnings = ()
 
     @staticmethod
     def _json_error(status, message):
@@ -160,6 +191,12 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             length = 0
         return self.rfile.read(max(0, length))
+
+    def _forget_authorization(self):
+        """Remove client credentials from the request object after capture."""
+        for key in list(self.headers):
+            if key.lower() in {"authorization", "proxy-authorization"}:
+                del self.headers[key]
 
     def _request_metadata(self, body):
         model = None
@@ -310,9 +347,11 @@ class Handler(BaseHTTPRequestHandler):
         try:
             request_headers = {key: value for key, value in self.headers.items() if key.lower() != "host"}
             try:
-                response = urlopen(Request(target, data=body, method=self.command, headers=request_headers), timeout=self.upstream_timeout)
+                response = open_url(Request(target, data=body, method=self.command, headers=request_headers), timeout=self.upstream_timeout)
             except HTTPError as exc:
                 response = exc
+            finally:
+                self._forget_authorization()
             record["status"] = response.status
             record["response_headers"] = headers(response.headers)
             record["response_content_type"] = response.headers.get("Content-Type")
@@ -384,9 +423,11 @@ class Handler(BaseHTTPRequestHandler):
             if self.sidecar_token:
                 request_headers["Authorization"] = "Bearer " + self.sidecar_token
             try:
-                response = urlopen(Request(target, data=safe_body, method="POST", headers=request_headers), timeout=self.upstream_timeout)
+                response = open_url(Request(target, data=safe_body, method="POST", headers=request_headers), timeout=self.upstream_timeout)
             except HTTPError as exc:
                 response = exc
+            finally:
+                self._forget_authorization()
             record["status"] = response.status
             record["response_headers"] = headers(response.headers)
             record["response_content_type"] = response.headers.get("Content-Type")
@@ -549,6 +590,8 @@ class Handler(BaseHTTPRequestHandler):
         calls = [dict(row) for row in connection.execute("SELECT id,session_id,created_at,completed_at,endpoint,model,status,status_code,duration_ms,input_bytes,output_bytes,error_type FROM calls ORDER BY id DESC LIMIT ?", (self.api_call_limit,))]
         sessions = [dict(row) for row in connection.execute("SELECT s.id,s.agent,s.started_at,s.last_seen_at,s.cwd,s.project_name,(SELECT COUNT(*) FROM calls x WHERE x.session_id=s.id) AS call_count FROM sessions s ORDER BY s.id DESC")]
         connection.close(); payload = {"calls": calls, "sessions": sessions}
+        if self.path == "/api/overview":
+            payload["security_warnings"] = list(self.security_warnings)
         if self.path == "/api/calls": payload = {"calls": calls}
         if self.path == "/api/sessions": payload = {"sessions": sessions}
         raw = json.dumps(payload, ensure_ascii=False).encode(); self.send_response(200); self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(raw))); self.end_headers(); self.wfile.write(raw)
@@ -561,7 +604,7 @@ class Handler(BaseHTTPRequestHandler):
             request_headers = {"Accept": "application/json"}
             if self.sidecar_token: request_headers["Authorization"] = "Bearer " + self.sidecar_token
             try:
-                response = urlopen(Request(self.sidecar_url.rstrip("/") + path, headers=request_headers), timeout=self.sidecar_timeout)
+                response = open_url(Request(self.sidecar_url.rstrip("/") + path, headers=request_headers), timeout=self.sidecar_timeout)
             except HTTPError as exc:
                 response = exc
             body = response.read(); self.send_response(response.status)
@@ -719,9 +762,12 @@ def main(argv=None):
     except SidecarStartupError as exc:
         print("pi-ai sidecar unavailable:", exc, file=sys.stderr)
     Handler.clients = []
-    Handler.db_path = path; Handler.upstream = settings.upstream; Handler.sidecar_url = configured_sidecar; Handler.sidecar_token = settings.sidecar_token; Handler.session_id = session_id
+    Handler.db_path = path; Handler.upstream = settings.upstream; Handler.security_warnings = settings.upstream_warnings; Handler.sidecar_url = configured_sidecar; Handler.sidecar_token = settings.sidecar_token; Handler.session_id = session_id
     Handler.db_timeout = settings.db_timeout; Handler.capture_max_body = settings.max_body; Handler.upstream_timeout = settings.upstream_timeout; Handler.sidecar_timeout = settings.sidecar_timeout; Handler.sse_keepalive = settings.sse_keepalive; Handler.api_call_limit = settings.api_call_limit; Handler.ui_path = settings.ui_path
-    host, port = validate_listen(settings.listen); print(f"gateway listening on http://{settings.listen}, upstream {settings.upstream}", flush=True); purge(path, settings.retention_days, settings.db_timeout)
+    host, port = validate_listen(settings.listen); print(f"gateway listening on http://{settings.listen}, upstream {settings.upstream}", flush=True)
+    for warning in settings.upstream_warnings:
+        print("WARNING: " + warning, file=sys.stderr, flush=True)
+    purge(path, settings.retention_days, settings.db_timeout)
     server = GatewayHTTPServer((host, port), Handler)
     start_purge_worker(server, path, settings.retention_days, settings.purge_interval, settings.db_timeout)
     try: server.serve_forever()

@@ -13,6 +13,7 @@ export const state = {
   detail: emptyDetail(),
   filters: { status: 'all', session: 'all', q: '' },
   conn: 'poll',
+  securityWarnings: [],
 };
 
 const listeners = new Set();
@@ -57,7 +58,7 @@ export async function load() {
     const data = await getJSON(endpoint, { signal: ctl.signal });
     if (seq !== loadSeq) return;
     if (tab === 'sessions') set({ sessions: data.sessions || [] });
-    else set({ calls: data.calls || [], sessions: data.sessions || [] });
+    else set({ calls: data.calls || [], sessions: data.sessions || [], securityWarnings: data.security_warnings || [] });
     set({ lastUpdated: new Date() });
     emit('data');
   } catch (err) {

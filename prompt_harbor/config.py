@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import argparse
 import configparser
+import ipaddress
 import os
+from urllib.parse import urlsplit
 from dataclasses import dataclass
 from typing import Callable, Optional, TypeVar
 
@@ -29,6 +31,41 @@ class ConfigError(ValueError):
     """Raised when a configuration file or override is invalid."""
 
 
+def validate_upstream(value: str) -> tuple[str, ...]:
+    """Validate the upstream origin and return user-facing security warnings.
+
+    Plain HTTP is intentionally limited to loopback hosts so local test
+    fixtures remain possible without allowing credentials onto the network.
+    """
+    try:
+        parsed = urlsplit(value)
+    except ValueError as exc:
+        raise ConfigError(f"upstream has invalid URL: {value!r}") from exc
+    if parsed.scheme not in {"https", "http"} or not parsed.hostname:
+        raise ConfigError("upstream must be an absolute https URL")
+    if parsed.username or parsed.password:
+        raise ConfigError("upstream must not contain embedded credentials")
+    if parsed.query:
+        raise ConfigError("upstream must not contain query parameters")
+    if parsed.fragment:
+        raise ConfigError("upstream must not contain a URL fragment")
+    hostname = parsed.hostname.lower().rstrip(".")
+    loopback = hostname == "localhost"
+    if not loopback:
+        try:
+            loopback = ipaddress.ip_address(hostname).is_loopback
+        except ValueError:
+            loopback = False
+    if parsed.scheme == "http" and not loopback:
+        raise ConfigError("upstream must use https; http is allowed only for loopback test fixtures")
+    warnings = []
+    if parsed.scheme == "http":
+        warnings.append("upstream uses unencrypted HTTP; this is allowed only because it targets loopback")
+    elif hostname != "api.openai.com":
+        warnings.append(f"custom upstream {parsed.scheme}://{parsed.netloc} will receive Authorization headers")
+    return tuple(warnings)
+
+
 @dataclass(frozen=True)
 class Settings:
     database: str = DEFAULT_DB
@@ -49,6 +86,7 @@ class Settings:
     sidecar_url: Optional[str] = None
     sidecar_command: Optional[str] = None
     sidecar_token: Optional[str] = None
+    upstream_warnings: tuple[str, ...] = ()
 
 
 T = TypeVar("T")
@@ -113,10 +151,13 @@ def load_settings(cli: argparse.Namespace) -> Settings:
 
     listen = string("listen", "gateway", "listen", "PROMPT_HARBOR_LISTEN", DEFAULT_LISTEN)
     validate_listen(listen)
+    upstream = string("upstream", "gateway", "upstream", "PROMPT_HARBOR_UPSTREAM", DEFAULT_UPSTREAM)
+    upstream_warnings = validate_upstream(upstream)
     return Settings(
         database=string("database", "gateway", "database", "PROMPT_HARBOR_DB", DEFAULT_DB),
         listen=listen,
-        upstream=string("upstream", "gateway", "upstream", "PROMPT_HARBOR_UPSTREAM", DEFAULT_UPSTREAM),
+        upstream=upstream,
+        upstream_warnings=upstream_warnings,
         max_body=integer("max_body", "gateway", "max_body", "PROMPT_HARBOR_MAX_BODY", DEFAULT_MAX_BODY),
         retention_days=integer("retention_days", "gateway", "retention_days", "PROMPT_HARBOR_RETENTION_DAYS", DEFAULT_RETENTION_DAYS),
         db_timeout=number("db_timeout", "gateway", "db_timeout", "PROMPT_HARBOR_DB_TIMEOUT", DEFAULT_DB_TIMEOUT),
