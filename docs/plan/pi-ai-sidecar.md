@@ -102,7 +102,7 @@ error
 
 上游认证由 sidecar 的 pi-ai provider 负责，优先级遵循 pi-ai 的环境变量、credential store 和 OAuth 机制。客户端发给 PromptHarbor 的 Authorization 只用于可选的本地 sidecar 访问控制，不直接传给 Anthropic/OpenAI。
 
-建议增加可选配置 `PROMPT_HARBOR_MESSAGES_TOKEN`：配置后 `/messages` 和 `/models` 必须使用该本地 token；未配置时依赖 loopback 绑定。比较使用常量时间比较。请求和响应 headers 继续通过现有 `sanitize()` 处理，Authorization、Cookie、Host 等敏感字段不落库、不打印。
+已实现可选配置 `PROMPT_HARBOR_MESSAGES_TOKEN`：配置后 `/messages` 和 `/models` 使用该本地 token；未配置时依赖 loopback 绑定。比较使用常量时间比较。请求和响应 headers 继续通过现有 `sanitize()` 处理，Authorization、Cookie、Host 等敏感字段不落库、不打印。对应回归覆盖见 `tests/test_pi_messages.py`。
 
 sidecar 的上游 credential store 与 PromptHarbor 的 SQLite 分离。PromptHarbor 不读取或复制 provider 的 API key，也不负责 OAuth 刷新。
 

@@ -3,7 +3,10 @@ __pycache__/
 *.pyc
 *.DS_Store
 *.egg-info/
+.venv/
+.pytest_cache/
 sidecar/node_modules/
 node_modules/
 test-results/
 prompt-harbor.ini
+*.db

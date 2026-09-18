@@ -15,6 +15,7 @@ sidecar_stop_timeout = 2
 api_call_limit = 200
 cli_call_limit = 50
 sse_keepalive = 15
+purge_interval = 86400
 # ui_path = /path/to/index.html
 
 [sidecar]

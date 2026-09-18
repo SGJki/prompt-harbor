@@ -17,7 +17,7 @@
 - SQLite 本地存储
 - 在保存上限内保存 prompt、response、请求/响应头（认证信息除外），超限时保留前缀并设置截断标记
 - 请求头中的 `Authorization` 透传到上游，但不写入数据库或日志
-- 数据按时间保留 2 天；启动和显式 `purge` 会清理过期数据
+- 数据按时间保留 2 天；启动、显式 `purge` 和后台周期任务会清理过期数据
 - CLI：启动、查看调用列表、查看详情、清理数据
 - 可选 pi-ai sidecar：`/messages`、`/models`、`/health`
 - 内置无构建步骤的 Web 审计台：Overview、Calls、Sessions 和实时失效通知
@@ -64,7 +64,7 @@ https://api.openai.com/v1/responses
 4. 对普通响应直接转发；对 SSE 响应边读取边写回客户端，同时复制响应内容用于记录。
 5. 记录状态码、响应头（排除认证信息）、受保存上限约束的 response body、首字节时间、完成时间和错误信息；超限时设置截断标记。
 6. 上游连接中断、客户端取消、网关异常都要留下可查询的失败事件。
-7. 每次启动和显式执行 `purge` 时删除超过 2 天的调用及其关联记录；后台周期清理尚未实现，见 `docs/TEST_REVIEW_FOLLOWUP.md`。
+7. 每次启动、显式执行 `purge` 和后台周期任务都会删除超过 2 天的调用及其关联记录；周期由 `purge_interval` / `PROMPT_HARBOR_PURGE_INTERVAL` 配置，默认 86400 秒。
 
 ## 5. 数据模型
 
@@ -104,10 +104,10 @@ uv run python -m prompt_harbor purge
 
 ## 8. 安全与限制
 
-- 设计上只绑定 `127.0.0.1`；当前 `--listen` 尚未拒绝其他 host，见 `docs/TEST_REVIEW_FOLLOWUP.md`。
+- 只绑定 `127.0.0.1`；`--listen` 在绑定前拒绝其他 host 和非法端口。
 - 不持久化 API key，不在 CLI 输出 API key。
 - 不做 prompt 内容脱敏；完整内容只保存在本机 SQLite，按 2 天策略清理。
-- 默认监听 loopback；由于 `--listen` 尚未强制校验，局域网或公网暴露风险仍是 pending。
+- 默认监听 loopback，配置校验不会允许局域网或公网地址。
 
 ## 9. UI
 

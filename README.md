@@ -32,6 +32,7 @@ sidecar_stop_timeout = 2
 api_call_limit = 200
 cli_call_limit = 50
 sse_keepalive = 15
+purge_interval = 86400
 
 [sidecar]
 # url = http://127.0.0.1:8790
@@ -71,7 +72,7 @@ prompt-harbor --database gateway.db show 1
 prompt-harbor --database gateway.db purge
 ```
 
-数据保留两天；网关启动和 `purge` 都会清理过期调用。`show` 展示完整 body、脱除认证字段的 headers、状态、耗时、错误与 usage。SSE 按 chunk 立即转发并 flush。
+数据保留两天；网关启动、显式 `purge` 和后台周期任务都会清理过期调用。`purge_interval`（默认 86400 秒）或 `PROMPT_HARBOR_PURGE_INTERVAL` 可调整周期。`show` 展示完整 body、脱除认证字段的 headers、状态、耗时、错误与 usage。SSE 按 chunk 立即转发并 flush。
 
 body 默认最多保存 10 MiB，可用 `PROMPT_HARBOR_MAX_BODY` 调整；超过限制时保留截断内容并设置截断标记。源码目录内也可以用 `python -m prompt_harbor`（或根目录的 `prompt_harbor.py`）运行同样的命令。
 
