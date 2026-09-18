@@ -23,3 +23,4 @@
 - Before starting work, scan every `iteration/iteration-{i}/` directory and follow the highest-numbered iteration whose records do not contain `状态：closed`.
 - An iteration is active until both its `PROGRESS.md` and `BLOCKED.md` contain `状态：closed`; closed iterations remain as history and must not be deleted as cleanup.
 - When no unclosed iteration exists, create the next numbered iteration and put its progress and blocked records there.
+- Maintain `iteration/INDEX.md` as the quick status index; update its row when an iteration is created, becomes active, or is closed. Treat the per-iteration records as the detailed source of truth.
