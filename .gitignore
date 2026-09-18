@@ -1,3 +1,4 @@
+.agents/
 .codex/
 __pycache__/
 *.pyc
@@ -10,3 +11,7 @@ node_modules/
 test-results/
 prompt-harbor.ini
 *.db
+
+# Iteration details are local working records; keep only the status index tracked.
+iteration/*
+!iteration/INDEX.md
