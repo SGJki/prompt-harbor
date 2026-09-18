@@ -1,4 +1,4 @@
-import http.client, json, socket, sqlite3, subprocess, sys, threading, time, pytest, os
+import http.client, json, socket, sqlite3, subprocess, sys, threading, time, pytest, os, struct
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -16,6 +16,28 @@ class JsonUpstream(BaseHTTPRequestHandler):
         self.send_response(200); self.send_header('Content-Type','application/json'); self.send_header('X-Up','yes'); body=b'{"ok":true}'; self.send_header('Content-Length',str(len(body))); self.end_headers(); self.wfile.write(body)
     def log_message(self,*a): pass
 
+class HeaderUpstream(BaseHTTPRequestHandler):
+    authorization = None
+    host = None
+    def do_POST(self):
+        n=int(self.headers.get('Content-Length','0')); self.rfile.read(n)
+        type(self).authorization=self.headers.get('Authorization'); type(self).host=self.headers.get('Host')
+        body=b'{"ok":true}'; self.send_response(200); self.send_header('Content-Type','application/json'); self.send_header('X-Up','yes'); self.send_header('Content-Length',str(len(body))); self.end_headers(); self.wfile.write(body)
+    def log_message(self,*a): pass
+
+class SlowStreamUpstream(BaseHTTPRequestHandler):
+    started = threading.Event()
+    release = threading.Event()
+    def do_POST(self):
+        n=int(self.headers.get('Content-Length','0')); self.rfile.read(n)
+        type(self).started.set(); self.send_response(200); self.send_header('Content-Type','text/event-stream'); self.end_headers()
+        self.wfile.write(b'data: {"delta":"prefix"}\n\n' + b'x' * 8170); self.wfile.flush()
+        type(self).release.wait(3)
+        try:
+            self.wfile.write(b'data: [DONE]\n\n'); self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError): pass
+    def log_message(self,*a): pass
+
 class StatusUpstream(BaseHTTPRequestHandler):
     code=400
     def do_POST(self):
@@ -29,6 +51,32 @@ class BrokenUpstream(BaseHTTPRequestHandler):
 
 def free():
     s=socket.socket();s.bind(('127.0.0.1',0)); p=s.getsockname()[1];s.close();return p
+
+def wait_for(db_path, query, predicate=lambda value: value, timeout=3, proc=None):
+    deadline=time.time()+timeout; last=None
+    while time.time()<deadline:
+        with sqlite3.connect(db_path) as c: last=c.execute(query).fetchone()
+        if predicate(last): return last
+        time.sleep(.03)
+    proc_state = None
+    if proc is not None:
+        proc_state = {'returncode': proc.poll()}
+        if proc_state['returncode'] is not None and proc.stderr is not None:
+            proc_state['stderr'] = proc.stderr.read()
+    raise AssertionError(f'timed out waiting for {query!r}; last={last!r}; process={proc_state!r}')
+
+def wait_for_rows(db_path, query, predicate=lambda rows: rows, timeout=3, proc=None):
+    deadline=time.time()+timeout; last=[]
+    while time.time()<deadline:
+        with sqlite3.connect(db_path) as c: last=c.execute(query).fetchall()
+        if predicate(last): return last
+        time.sleep(.03)
+    proc_state = None
+    if proc is not None:
+        proc_state = {'returncode': proc.poll()}
+        if proc_state['returncode'] is not None and proc.stderr is not None:
+            proc_state['stderr'] = proc.stderr.read()
+    raise AssertionError(f'timed out waiting for rows from {query!r}; last={last!r}; process={proc_state!r}')
 
 def test_sse_capture_and_auth(tmp_path):
     try:
@@ -48,12 +96,7 @@ def test_sse_capture_and_auth(tmp_path):
         if proc.poll() is not None:
             pytest.fail('gateway failed to bind loopback listener')
         c=http.client.HTTPConnection('127.0.0.1',port,timeout=5); c.request('POST','/v1/responses',json.dumps({'model':'test','stream':True}),{'Authorization':'Bearer SECRET','Content-Type':'application/json'}); r=c.getresponse(); first=r.read(8); assert first.startswith(b'data: {"'); rest=r.read(); assert b'[DONE]' in first+rest; c.close()
-        deadline=time.time()+3
-        rows=None
-        while time.time()<deadline:
-            rows=sqlite3.connect(db).execute('select request_headers_json,response_body from attempts join payloads on payloads.attempt_id=attempts.id').fetchone()
-            if rows and rows[1] is not None: break
-            time.sleep(.05)
+        rows=wait_for(db,'select request_headers_json,response_body from attempts join payloads on payloads.attempt_id=attempts.id',lambda x:x and x[1] is not None,proc=proc)
         proc.terminate(); proc.wait(); print('ERR', proc.stderr.read())
         assert rows and rows[1] is not None
         rows=rows; assert 'SECRET' not in rows[0]; assert 'SECRET' not in rows[1].decode(); assert b'[DONE]' in rows[1]
@@ -75,11 +118,43 @@ def test_json_transparent_forward(tmp_path):
         body=b'{"model":"m","input":"hello"}'; c=http.client.HTTPConnection('127.0.0.1',port); c.request('POST','/v1/responses',body,{'Content-Type':'application/json','Authorization':'Bearer TEST_SECRET_123'}); r=c.getresponse(); assert r.status==200 and r.read()==b'{"ok":true}'; c.close(); assert JsonUpstream.seen==body
     finally: proc.terminate(); proc.wait(); up.shutdown()
 
+def test_sse_invalidate_after_real_post_without_closing_subscription(tmp_path):
+    up=ThreadingHTTPServer(('127.0.0.1',0),JsonUpstream); threading.Thread(target=up.serve_forever,daemon=True).start(); proc,port,db=run_gateway(tmp_path,up)
+    event_conn=None
+    try:
+        event_conn=http.client.HTTPConnection('127.0.0.1',port,timeout=3); event_conn.request('GET','/api/events'); events=event_conn.getresponse()
+        assert events.status==200; assert events.readline()==b'event: ready\n'; assert events.readline()==b'data: {}\n'; assert events.readline()==b'\n'
+        c=http.client.HTTPConnection('127.0.0.1',port,timeout=3); c.request('POST','/v1/responses',b'{"model":"notify"}',{'Content-Type':'application/json'}); r=c.getresponse(); assert r.status==200; r.read(); c.close()
+        lines=[]
+        deadline=time.time()+3
+        while time.time()<deadline:
+            line=events.readline(); lines.append(line)
+            if line==b'event: invalidate\n': break
+        assert b'event: invalidate\n' in lines
+        assert events.readline()==b'data: {"resource":"calls"}\n'; assert events.readline()==b'\n'
+        c=http.client.HTTPConnection('127.0.0.1',port,timeout=3); c.request('POST','/v1/responses',b'{"model":"notify-again"}'); r=c.getresponse(); assert r.status==200; r.read(); c.close()
+        assert events.readline()==b'event: invalidate\n'; assert events.readline()==b'data: {"resource":"calls"}\n'; assert events.readline()==b'\n'
+    finally:
+        if event_conn: event_conn.close()
+        proc.terminate(); proc.wait(timeout=3); up.shutdown()
+
+def test_forwarded_headers_and_secret_never_persisted_or_logged(tmp_path):
+    HeaderUpstream.authorization=None; HeaderUpstream.host=None
+    up=ThreadingHTTPServer(('127.0.0.1',0),HeaderUpstream); threading.Thread(target=up.serve_forever,daemon=True).start(); proc,port,db=run_gateway(tmp_path,up)
+    try:
+        secret='Bearer HEADER_TEST_SECRET'; c=http.client.HTTPConnection('127.0.0.1',port,timeout=3); c.request('POST','/v1/responses',b'{"model":"headers"}',{'Content-Type':'application/json','Authorization':secret}); r=c.getresponse(); assert r.status==200 and r.getheader('X-Up')=='yes'; r.read(); c.close()
+        wait_for(db,'select status from calls',lambda x:x and x[0]!='running')
+        assert HeaderUpstream.authorization==secret; assert HeaderUpstream.host==f'127.0.0.1:{up.server_port}'
+        raw=sqlite3.connect(db).execute('select request_headers_json,response_headers_json from attempts').fetchone(); assert secret not in ''.join(raw)
+        c=http.client.HTTPConnection('127.0.0.1',port,timeout=3); c.request('GET','/api/calls/1'); detail=c.getresponse().read().decode(); c.close(); assert secret not in detail
+    finally:
+        proc.terminate(); stdout,stderr=proc.communicate(timeout=3); up.shutdown(); assert 'HEADER_TEST_SECRET' not in (stdout+stderr)
+
 def test_storage_limit_sets_truncated_flags(tmp_path):
     up=ThreadingHTTPServer(('127.0.0.1',0),JsonUpstream); threading.Thread(target=up.serve_forever,daemon=True).start(); proc,port,db=run_gateway(tmp_path,up,{'PROMPT_HARBOR_MAX_BODY':'4'})
     try:
-        c=http.client.HTTPConnection('127.0.0.1',port); c.request('POST','/v1/responses',b'123456789'); r=c.getresponse(); r.read(); c.close(); time.sleep(.2)
-        row=sqlite3.connect(db).execute('select request_truncated,response_truncated,length(request_body),length(response_body) from payloads').fetchone(); assert row==(1,1,4,4)
+        c=http.client.HTTPConnection('127.0.0.1',port); c.request('POST','/v1/responses',b'123456789'); r=c.getresponse(); r.read(); c.close()
+        row=wait_for(db,'select request_truncated,response_truncated,length(request_body),length(response_body) from payloads',lambda x:x and x[2] is not None,proc=proc); assert row==(1,1,4,4)
     finally: proc.terminate(); proc.wait(); up.shutdown()
 
 def test_multiple_requests_share_startup_session(tmp_path):
@@ -87,19 +162,18 @@ def test_multiple_requests_share_startup_session(tmp_path):
     try:
         for _ in range(2):
             c=http.client.HTTPConnection('127.0.0.1',port); c.request('POST','/v1/responses',b'{"model":"m"}'); r=c.getresponse(); assert r.status==200; r.read(); c.close()
-        deadline=time.time()+2
-        while time.time()<deadline and sqlite3.connect(db).execute('select count(*) from calls').fetchone()[0] < 2: time.sleep(.05)
+        wait_for_rows(db,'select status from calls order by id',lambda rows:len(rows)==2 and all(row[0]!='running' for row in rows),proc=proc)
         c=sqlite3.connect(db); assert c.execute('select count(*) from sessions').fetchone()==(1,); assert c.execute('select count(distinct session_id) from calls').fetchone()==(1,)
     finally: proc.terminate(); proc.wait(); up.shutdown()
 
 import pytest
 @pytest.mark.parametrize('code',[400,401,429,500])
 def test_upstream_error_status_preserved(tmp_path, code):
-    StatusUpstream.code=code
+    previous=StatusUpstream.code; StatusUpstream.code=code
     up=ThreadingHTTPServer(('127.0.0.1',0),StatusUpstream); threading.Thread(target=up.serve_forever,daemon=True).start(); proc,port,db=run_gateway(tmp_path,up)
     try:
         c=http.client.HTTPConnection('127.0.0.1',port); c.request('POST','/v1/responses',b'{}'); r=c.getresponse(); assert r.status==code and b'bad' in r.read(); c.close()
-    finally: proc.terminate(); proc.wait(); up.shutdown()
+    finally: proc.terminate(); proc.wait(); up.shutdown(); StatusUpstream.code=previous
 
 def test_upstream_connection_failure_returns_502(tmp_path):
     port=free(); db=tmp_path/'g.db'; proc=subprocess.Popen([sys.executable,str(ROOT/'prompt_harbor.py'),'start','--database',str(db),'--listen',f'127.0.0.1:{port}','--upstream','http://127.0.0.1:1'],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
@@ -128,7 +202,34 @@ def test_upstream_disconnect_records_partial_failure(tmp_path):
 def test_client_disconnect_does_not_crash_gateway(tmp_path):
     up=ThreadingHTTPServer(('127.0.0.1',0),Upstream); threading.Thread(target=up.serve_forever,daemon=True).start(); proc,port,db=run_gateway(tmp_path,up)
     try:
-        s=socket.create_connection(('127.0.0.1',port)); s.sendall(b'POST /v1/responses HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\nContent-Type: application/json\r\n\r\n{}'); s.shutdown(socket.SHUT_RDWR); s.close(); time.sleep(.4); assert proc.poll() is None
+        s=socket.create_connection(('127.0.0.1',port)); s.sendall(b'POST /v1/responses HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\nContent-Type: application/json\r\n\r\n{}'); s.shutdown(socket.SHUT_RDWR); s.close()
+        wait_for(db,'select status from calls',lambda row:row and row[0]!='running',proc=proc); assert proc.poll() is None
+    finally: proc.terminate(); proc.wait(); up.shutdown()
+
+def test_client_cancel_records_failed_terminal_chain_and_service_survives(tmp_path):
+    SlowStreamUpstream.started.clear(); SlowStreamUpstream.release.clear()
+    up=ThreadingHTTPServer(('127.0.0.1',0),SlowStreamUpstream); threading.Thread(target=up.serve_forever,daemon=True).start(); proc,port,db=run_gateway(tmp_path,up)
+    try:
+        s=socket.create_connection(('127.0.0.1',port),timeout=3); request=b'POST /v1/responses HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\nContent-Type: application/json\r\n\r\n{}'; s.sendall(request)
+        assert SlowStreamUpstream.started.wait(2)
+        received=b''
+        while b'prefix' not in received:
+            received += s.recv(4096)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack('ii', 1, 0)); s.close(); SlowStreamUpstream.release.set()
+        row=wait_for(db,'select c.status,a.status,c.error_type,a.error_type,c.completed_at,a.completed_at,p.response_body,p.response_complete from calls c join attempts a on a.call_id=c.id join payloads p on p.attempt_id=a.id',lambda x:x and x[0]=='failed' and x[1]=='failed' and x[4] is not None,proc=proc)
+        assert row[2:4]==('client_cancel','client_cancel'); assert row[5] is not None and row[6] and b'prefix' in row[6] and row[7]==0
+        c=http.client.HTTPConnection('127.0.0.1',port,timeout=3); c.request('POST','/v1/responses',b'{}'); r=c.getresponse(); assert r.status==200; r.read(); c.close()
+    finally:
+        SlowStreamUpstream.release.set(); proc.terminate(); proc.wait(timeout=3); up.shutdown()
+
+def test_exact_body_limit_preserves_complete_request_and_response(tmp_path):
+    class ExactUpstream(BaseHTTPRequestHandler):
+        def do_POST(self):
+            n=int(self.headers.get('Content-Length','0')); self.rfile.read(n); body=b'0123456789'; self.send_response(200); self.send_header('Content-Length',str(len(body))); self.end_headers(); self.wfile.write(body)
+        def log_message(self,*a): pass
+    up=ThreadingHTTPServer(('127.0.0.1',0),ExactUpstream); threading.Thread(target=up.serve_forever,daemon=True).start(); proc,port,db=run_gateway(tmp_path,up,{'PROMPT_HARBOR_MAX_BODY':'10'})
+    try:
+        body=b'1234567890'; c=http.client.HTTPConnection('127.0.0.1',port); c.request('POST','/v1/responses',body); r=c.getresponse(); response=r.read(); c.close(); row=wait_for(db,'select request_body,response_body,request_truncated,response_truncated from payloads',lambda x:x and x[1] is not None); assert row==(body,response,0,0)
     finally: proc.terminate(); proc.wait(); up.shutdown()
 
 def test_gateway_serves_audit_ui_and_overview_api(tmp_path):
@@ -136,7 +237,6 @@ def test_gateway_serves_audit_ui_and_overview_api(tmp_path):
     try:
         c=http.client.HTTPConnection('127.0.0.1',port); c.request('GET','/'); r=c.getresponse(); body=r.read(); assert r.status==200 and b'text/html' in r.getheader('Content-Type').encode() and b'prompt harbor' in body; c.close()
         c=http.client.HTTPConnection('127.0.0.1',port); c.request('POST','/v1/responses',b'{"model":"m"}'); r=c.getresponse(); assert r.status==200; r.read(); c.close()
-        deadline=time.time()+3
-        while time.time()<deadline and sqlite3.connect(db).execute('select count(*) from calls').fetchone()[0] < 1: time.sleep(.05)
+        wait_for(db,'select status from calls',lambda row:row and row[0]!='running',proc=proc)
         c=http.client.HTTPConnection('127.0.0.1',port); c.request('GET','/api/overview'); r=c.getresponse(); payload=json.loads(r.read()); assert r.status==200 and len(payload['calls'])==1 and payload['calls'][0]['model']=='m'; c.close()
     finally: proc.terminate(); proc.wait(); up.shutdown()

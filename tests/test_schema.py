@@ -1,5 +1,6 @@
-import argparse, json, os, sqlite3, subprocess, sys
+import argparse, json, os, sqlite3, subprocess, sys, socket, threading, time, http.client
 from pathlib import Path
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import prompt_harbor as g
 
 def db_with_schema(tmp_path):
@@ -24,8 +25,49 @@ def test_default_constants(): assert g.DEFAULT_LISTEN=='127.0.0.1:8787' and g.DE
 def test_iso_format(): assert 'T' in g.iso()
 def test_purge_empty(tmp_path): assert g.purge(str(db_with_schema(tmp_path)))==0
 def test_schema_idempotent(tmp_path): p=db_with_schema(tmp_path); g.init(str(p)); assert sqlite3.connect(p).execute('select count(*) from sessions').fetchone()==(0,)
-def test_model_extraction_shape(): assert json.loads('{"model":"m"}')['model']=='m'
-def test_stream_boolean(): assert bool(json.loads('{"stream":true}')['stream'])
+class ExtractionUpstream(BaseHTTPRequestHandler):
+    def do_POST(self):
+        n=int(self.headers.get('Content-Length','0')); self.rfile.read(n)
+        body=b'{"ok":true}'; self.send_response(200); self.send_header('Content-Type','application/json'); self.send_header('Content-Length',str(len(body))); self.end_headers(); self.wfile.write(body)
+    def log_message(self,*a): pass
+
+def _free_port():
+    with socket.socket() as s: s.bind(('127.0.0.1',0)); return s.getsockname()[1]
+
+def _start_extraction_gateway(tmp_path):
+    up=ThreadingHTTPServer(('127.0.0.1',0),ExtractionUpstream); threading.Thread(target=up.serve_forever,daemon=True).start(); port=_free_port(); db=tmp_path/'extract.db'
+    proc=subprocess.Popen([sys.executable,str(Path(__file__).parents[1]/'prompt_harbor.py'),'start','--database',str(db),'--listen',f'127.0.0.1:{port}','--upstream',f'http://127.0.0.1:{up.server_port}'],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+    deadline=time.time()+5
+    while time.time()<deadline:
+        try:
+            c=http.client.HTTPConnection('127.0.0.1',port,timeout=1); c.connect(); c.close(); return proc,up,port,db
+        except OSError: time.sleep(.03)
+    proc.kill(); up.shutdown(); raise AssertionError('gateway did not start')
+
+def test_model_extraction_shape(tmp_path):
+    proc,up,port,db=_start_extraction_gateway(tmp_path)
+    try:
+        c=http.client.HTTPConnection('127.0.0.1',port); c.request('POST','/v1/responses',b'{"model":"real-model"}'); r=c.getresponse(); assert r.status==200; r.read(); c.close()
+        row=None; deadline=time.time()+3
+        while time.time()<deadline:
+            row=sqlite3.connect(db).execute('select model,stream from calls').fetchone()
+            if row: break
+            time.sleep(.03)
+        assert row==('real-model',0)
+    finally: proc.terminate(); proc.wait(timeout=3); up.shutdown()
+
+def test_stream_boolean(tmp_path):
+    proc,up,port,db=_start_extraction_gateway(tmp_path)
+    try:
+        for payload in (b'{"model":"true","stream":true}',b'{"model":"false","stream":false}',b'{"model":"missing"}'):
+            c=http.client.HTTPConnection('127.0.0.1',port); c.request('POST','/v1/responses',payload); r=c.getresponse(); assert r.status==200; r.read(); c.close()
+        rows=[]; deadline=time.time()+3
+        while time.time()<deadline:
+            rows=sqlite3.connect(db).execute('select model,stream from calls order by id').fetchall()
+            if len(rows)==3: break
+            time.sleep(.03)
+        assert rows==[('true',1),('false',0),('missing',0)]
+    finally: proc.terminate(); proc.wait(timeout=3); up.shutdown()
 def test_headers_case_insensitive(): assert 'authorization' not in {k.lower() for k in g.headers({'authorization':'x'})}
 def test_init_cli(tmp_path):
     p=tmp_path/'c.db'; r=subprocess.run([sys.executable,'prompt_harbor.py','init','--database',str(p)],capture_output=True,text=True); assert r.returncode==0 and p.exists()
