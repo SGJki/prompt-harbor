@@ -22,6 +22,7 @@ DEFAULT_SIDECAR_STOP_TIMEOUT = 2.0
 DEFAULT_API_CALL_LIMIT = 200
 DEFAULT_CLI_CALL_LIMIT = 50
 DEFAULT_SSE_KEEPALIVE = 15.0
+DEFAULT_PURGE_INTERVAL = 24 * 60 * 60.0
 
 
 class ConfigError(ValueError):
@@ -43,6 +44,7 @@ class Settings:
     api_call_limit: int = DEFAULT_API_CALL_LIMIT
     cli_call_limit: int = DEFAULT_CLI_CALL_LIMIT
     sse_keepalive: float = DEFAULT_SSE_KEEPALIVE
+    purge_interval: float = DEFAULT_PURGE_INTERVAL
     ui_path: Optional[str] = None
     sidecar_url: Optional[str] = None
     sidecar_command: Optional[str] = None
@@ -109,9 +111,11 @@ def load_settings(cli: argparse.Namespace) -> Settings:
     string = lambda field, section, key, env, default: str(_raw_value(cli, parser, field, section, key, env, default)).strip()
     optional = lambda field, section, key, env: _optional(_raw_value(cli, parser, field, section, key, env, ""))
 
+    listen = string("listen", "gateway", "listen", "PROMPT_HARBOR_LISTEN", DEFAULT_LISTEN)
+    validate_listen(listen)
     return Settings(
         database=string("database", "gateway", "database", "PROMPT_HARBOR_DB", DEFAULT_DB),
-        listen=string("listen", "gateway", "listen", "PROMPT_HARBOR_LISTEN", DEFAULT_LISTEN),
+        listen=listen,
         upstream=string("upstream", "gateway", "upstream", "PROMPT_HARBOR_UPSTREAM", DEFAULT_UPSTREAM),
         max_body=integer("max_body", "gateway", "max_body", "PROMPT_HARBOR_MAX_BODY", DEFAULT_MAX_BODY),
         retention_days=integer("retention_days", "gateway", "retention_days", "PROMPT_HARBOR_RETENTION_DAYS", DEFAULT_RETENTION_DAYS),
@@ -123,11 +127,24 @@ def load_settings(cli: argparse.Namespace) -> Settings:
         api_call_limit=integer("api_call_limit", "gateway", "api_call_limit", "PROMPT_HARBOR_API_CALL_LIMIT", DEFAULT_API_CALL_LIMIT),
         cli_call_limit=integer("cli_call_limit", "gateway", "cli_call_limit", "PROMPT_HARBOR_CLI_CALL_LIMIT", DEFAULT_CLI_CALL_LIMIT),
         sse_keepalive=number("sse_keepalive", "gateway", "sse_keepalive", "PROMPT_HARBOR_SSE_KEEPALIVE", DEFAULT_SSE_KEEPALIVE),
+        purge_interval=number("purge_interval", "gateway", "purge_interval", "PROMPT_HARBOR_PURGE_INTERVAL", DEFAULT_PURGE_INTERVAL),
         ui_path=optional("ui_path", "gateway", "ui_path", "PROMPT_HARBOR_UI"),
         sidecar_url=optional("pi_sidecar_url", "sidecar", "url", "PROMPT_HARBOR_PI_SIDECAR_URL"),
         sidecar_command=optional("pi_sidecar_command", "sidecar", "command", "PROMPT_HARBOR_PI_SIDECAR_COMMAND"),
         sidecar_token=optional("pi_sidecar_token", "sidecar", "token", "PROMPT_HARBOR_MESSAGES_TOKEN"),
     )
+
+
+def validate_listen(value: str) -> tuple[str, int]:
+    """Validate the deliberately narrow local-only listener contract."""
+    try:
+        host, raw_port = value.rsplit(":", 1)
+        port = int(raw_port)
+    except (AttributeError, ValueError):
+        raise ConfigError("listen must be 127.0.0.1:PORT") from None
+    if host != "127.0.0.1" or not 0 <= port <= 65535:
+        raise ConfigError("listen must use host 127.0.0.1 and port 0-65535")
+    return host, port
 
 
 def value(cli, env_name, default):

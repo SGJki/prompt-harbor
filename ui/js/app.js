@@ -18,8 +18,20 @@ function renderView() {
   if (state.tab === 'calls') view.innerHTML = callsView(state);
   else if (state.tab === 'sessions') view.innerHTML = sessionsView(state);
   else view.innerHTML = overviewView(state);
+  bindRowActions();
   updateDetail();
   updateStatus();
+}
+
+function bindRowActions() {
+  view.querySelectorAll('.call-row').forEach(row => {
+    const activate = () => selectCall(Number(row.dataset.callId));
+    row.addEventListener('click', activate);
+    row.querySelectorAll('td').forEach(cell => cell.addEventListener('click', event => {
+      event.stopPropagation();
+      activate();
+    }));
+  });
 }
 
 function updateRows() {
@@ -27,6 +39,7 @@ function updateRows() {
   if (!box) return;
   const shown = filterCalls(state);
   box.innerHTML = callTable(shown, state.selectedCallId);
+  bindRowActions();
   const count = document.querySelector('#call-count');
   if (count) count.textContent = `${shown.length} of ${state.calls.length} calls`;
 }
@@ -75,11 +88,6 @@ banner.addEventListener('click', e => {
 });
 
 view.addEventListener('click', e => {
-  const row = e.target.closest('.call-row');
-  if (row) {
-    selectCall(Number(row.dataset.callId));
-    return;
-  }
   const sessionBtn = e.target.closest('[data-session-calls]');
   if (sessionBtn) {
     jumpToSession(sessionBtn.dataset.sessionCalls);

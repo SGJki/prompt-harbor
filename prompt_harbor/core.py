@@ -6,6 +6,7 @@ import json
 import os
 import sqlite3
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -22,10 +23,12 @@ from .config import (
     DEFAULT_RETENTION_DAYS,
     DEFAULT_SSE_KEEPALIVE,
     DEFAULT_SIDECAR_TIMEOUT,
+    DEFAULT_PURGE_INTERVAL,
     DEFAULT_UPSTREAM,
     DEFAULT_UPSTREAM_TIMEOUT,
     ConfigError,
     load_settings,
+    validate_listen,
 )
 from .headers import sanitize
 from .pi_messages import PiMessagesState, normalize_usage, split_model_id
@@ -56,7 +59,15 @@ def schema(connection):
         CREATE TABLE IF NOT EXISTS attempts(id INTEGER PRIMARY KEY AUTOINCREMENT,call_id INTEGER,attempt_no INTEGER,started_at TEXT,completed_at TEXT,upstream_url TEXT,status TEXT,status_code INTEGER,request_headers_json TEXT,response_headers_json TEXT,first_byte_at TEXT,duration_ms INTEGER,input_bytes INTEGER DEFAULT 0,output_bytes INTEGER DEFAULT 0,error_type TEXT,error_message TEXT);
         CREATE TABLE IF NOT EXISTS payloads(id INTEGER PRIMARY KEY AUTOINCREMENT,attempt_id INTEGER UNIQUE,request_body BLOB,response_body BLOB,request_content_type TEXT,response_content_type TEXT,response_complete INTEGER DEFAULT 0,request_truncated INTEGER DEFAULT 0,response_truncated INTEGER DEFAULT 0,created_at TEXT,updated_at TEXT);
         CREATE TABLE IF NOT EXISTS usage(id INTEGER PRIMARY KEY AUTOINCREMENT,attempt_id INTEGER UNIQUE,input_tokens INTEGER,output_tokens INTEGER,total_tokens INTEGER,raw_usage_json TEXT);
+        CREATE TABLE IF NOT EXISTS change_log(id INTEGER PRIMARY KEY AUTOINCREMENT,resource TEXT NOT NULL,changed_at TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS calls_created_idx ON calls(created_at);
+        CREATE INDEX IF NOT EXISTS change_log_id_idx ON change_log(id);
+        CREATE TRIGGER IF NOT EXISTS calls_change_insert AFTER INSERT ON calls BEGIN INSERT INTO change_log(resource,changed_at) VALUES('calls',CURRENT_TIMESTAMP); END;
+        CREATE TRIGGER IF NOT EXISTS calls_change_update AFTER UPDATE ON calls BEGIN INSERT INTO change_log(resource,changed_at) VALUES('calls',CURRENT_TIMESTAMP); END;
+        CREATE TRIGGER IF NOT EXISTS calls_change_delete AFTER DELETE ON calls BEGIN INSERT INTO change_log(resource,changed_at) VALUES('calls',CURRENT_TIMESTAMP); END;
+        CREATE TRIGGER IF NOT EXISTS sessions_change_insert AFTER INSERT ON sessions BEGIN INSERT INTO change_log(resource,changed_at) VALUES('sessions',CURRENT_TIMESTAMP); END;
+        CREATE TRIGGER IF NOT EXISTS sessions_change_update AFTER UPDATE OF agent,started_at,cwd,project_name,metadata_json ON sessions BEGIN INSERT INTO change_log(resource,changed_at) VALUES('sessions',CURRENT_TIMESTAMP); END;
+        CREATE TRIGGER IF NOT EXISTS sessions_change_delete AFTER DELETE ON sessions BEGIN INSERT INTO change_log(resource,changed_at) VALUES('sessions',CURRENT_TIMESTAMP); END;
         """
     )
     if connection.execute("PRAGMA user_version").fetchone()[0] < 1:
@@ -96,9 +107,14 @@ def extract_usage(data):
 
 
 def body_limit(configured=None):
-    if configured is not None:
-        return configured
-    return int(os.getenv("PROMPT_HARBOR_MAX_BODY", str(DEFAULT_MAX_BODY)))
+    raw = configured if configured is not None else os.getenv("PROMPT_HARBOR_MAX_BODY", str(DEFAULT_MAX_BODY))
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        raise ConfigError(f"max_body has invalid value: {raw!r}") from None
+    if value <= 0:
+        raise ConfigError(f"max_body has invalid value: {raw!r}")
+    return value
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -110,12 +126,17 @@ class Handler(BaseHTTPRequestHandler):
     sidecar_token = None
     session_id = None
     db_timeout = DEFAULT_DB_TIMEOUT
-    capture_max_body = DEFAULT_MAX_BODY
+    capture_max_body = None
     upstream_timeout = DEFAULT_UPSTREAM_TIMEOUT
     sidecar_timeout = DEFAULT_SIDECAR_TIMEOUT
     sse_keepalive = DEFAULT_SSE_KEEPALIVE
     api_call_limit = DEFAULT_API_CALL_LIMIT
     ui_path = None
+
+    @staticmethod
+    def _json_error(status, message):
+        raw = json.dumps({"error": {"type": "invalid_request", "message": message}}, ensure_ascii=False).encode()
+        return raw
 
     def do_POST(self):
         if self.path == "/messages":
@@ -173,6 +194,45 @@ class Handler(BaseHTTPRequestHandler):
             "state": "failed", "error_type": None, "error_message": None, "response_complete": False,
         }
 
+    def _begin_configuration_failure(self, body, model, stream, provider, api_family, target, error, input_bytes=None):
+        """Persist a terminal lifecycle even when request-time capture config is invalid."""
+        started = time.time()
+        created = iso(started)
+        request_size = len(body) if input_bytes is None else input_bytes
+        connection = db(self.db_path, self.db_timeout)
+        connection.execute("UPDATE sessions SET last_seen_at=? WHERE id=?", (created, self.session_id))
+        cursor = connection.execute(
+            "INSERT INTO calls(session_id,created_at,provider,api_family,endpoint,model,stream,status,input_bytes,error_type,error_message) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (self.session_id, created, provider, api_family, self.path, model, int(bool(stream)), "failed", request_size, "configuration_error", str(error)),
+        )
+        call_id = cursor.lastrowid
+        cursor = connection.execute(
+            "INSERT INTO attempts(call_id,attempt_no,started_at,completed_at,upstream_url,status,status_code,request_headers_json,input_bytes,error_type,error_message) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (call_id, 1, created, created, target, "failed", 400, json.dumps(headers(self.headers), ensure_ascii=False), request_size, "configuration_error", str(error)),
+        )
+        attempt_id = cursor.lastrowid
+        connection.execute(
+            "INSERT INTO payloads(attempt_id,request_body,request_content_type,response_complete,request_truncated,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
+            (attempt_id, body[:DEFAULT_MAX_BODY], self.headers.get("Content-Type"), 1, 0, created, created),
+        )
+        connection.commit()
+        connection.close()
+        return {
+            "started": started, "call_id": call_id, "attempt_id": attempt_id, "limit": DEFAULT_MAX_BODY,
+            "out": bytearray(), "total_out": 0, "response_truncated": False, "first": None,
+            "status": 400, "response_headers": {}, "response_content_type": "application/json",
+            "state": "failed", "error_type": "configuration_error", "error_message": str(error), "response_complete": True,
+        }
+
+    def _send_json_error(self, status, message):
+        raw = self._json_error(status, message)
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+        self.wfile.flush()
+
     def _capture_chunk(self, record, chunk):
         if not chunk:
             return
@@ -202,13 +262,25 @@ class Handler(BaseHTTPRequestHandler):
             connection.execute("INSERT OR REPLACE INTO usage(attempt_id,input_tokens,output_tokens,total_tokens,raw_usage_json) VALUES(?,?,?,?,?)", (record["attempt_id"], normalized.get("input_tokens"), normalized.get("output_tokens"), normalized.get("total_tokens"), json.dumps(raw_value, ensure_ascii=False)))
         connection.commit()
         connection.close()
-        self._notify_calls()
+        self._notify_resources({"calls"})
 
-    def _notify_calls(self):
+    @staticmethod
+    def _event_bytes(resource):
+        return f'event: invalidate\ndata: {{"resource":"{resource}"}}\n\n'.encode()
+
+    def _send_event(self, resource):
+        self.wfile.write(self._event_bytes(resource))
+        self.wfile.flush()
+
+    def _notify_resources(self, resources):
         for client in list(self.clients):
             try:
-                client.wfile.write(b'event: invalidate\ndata: {"resource":"calls"}\n\n')
-                client.wfile.flush()
+                for resource in sorted(resources):
+                    client._send_event(resource)
+                client._sse_last_notified = getattr(client, "_sse_last_notified", set()) | set(resources)
+                connection = db(self.db_path, self.db_timeout)
+                client._sse_change_id = connection.execute("SELECT COALESCE(MAX(id), 0) FROM change_log").fetchone()[0]
+                connection.close()
             except Exception:
                 try:
                     self.clients.remove(client)
@@ -219,7 +291,13 @@ class Handler(BaseHTTPRequestHandler):
         body = self._read_body()
         _, model, stream = self._request_metadata(body)
         target = self.upstream.rstrip("/") + self.path
-        record = self._begin_attempt(body, model, stream, "openai", "openai", target)
+        try:
+            record = self._begin_attempt(body, model, stream, "openai", "openai", target)
+        except (ConfigError, ValueError) as exc:
+            record = self._begin_configuration_failure(body, model, stream, "openai", "openai", target, exc)
+            self._send_json_error(400, str(exc))
+            self._finish_attempt(record)
+            return
         response = None
         usage = None
         try:
@@ -275,7 +353,13 @@ class Handler(BaseHTTPRequestHandler):
         provider, _ = split_model_id(model)
         target = (self.sidecar_url.rstrip("/") + "/messages") if self.sidecar_url else "sidecar://unavailable/messages"
         safe_body = self._safe_pi_body(parsed, body)
-        record = self._begin_attempt(safe_body, model, True, provider or "pi-ai", "pi-messages", target, input_bytes=len(body))
+        try:
+            record = self._begin_attempt(safe_body, model, True, provider or "pi-ai", "pi-messages", target, input_bytes=len(body))
+        except (ConfigError, ValueError) as exc:
+            record = self._begin_configuration_failure(safe_body, model, True, provider or "pi-ai", "pi-messages", target, exc, input_bytes=len(body))
+            self._send_json_error(400, str(exc))
+            self._finish_attempt(record)
+            return
         state = PiMessagesState()
         response = None
         if not isinstance(parsed, dict) or not isinstance(model, str) or not isinstance(parsed.get("context"), dict):
@@ -427,11 +511,29 @@ class Handler(BaseHTTPRequestHandler):
             raw = json.dumps(value, ensure_ascii=False).encode(); self.send_response(200); self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(raw))); self.end_headers(); self.wfile.write(raw); return
         if self.path == "/api/events":
             self.send_response(200); self.send_header("Content-Type", "text/event-stream"); self.send_header("Cache-Control", "no-cache"); self.send_header("Connection", "keep-alive"); self.end_headers(); self.wfile.write(b"event: ready\ndata: {}\n\n"); self.wfile.flush(); self.clients.append(self)
+            self._sse_connection = db(self.db_path, self.db_timeout)
+            self._sse_change_id = self._sse_connection.execute("SELECT COALESCE(MAX(id), 0) FROM change_log").fetchone()[0]
+            self._sse_last_notified = set()
             try:
                 while True:
-                    time.sleep(self.sse_keepalive); self.wfile.write(b": keepalive\n\n"); self.wfile.flush()
+                    interval = max(0.01, float(self.sse_keepalive))
+                    time.sleep(interval)
+                    changes = self._sse_connection.execute(
+                        "SELECT id,resource FROM change_log WHERE id>? ORDER BY id", (self._sse_change_id,)
+                    ).fetchall()
+                    if changes:
+                        self._sse_change_id = changes[-1][0]
+                        resources = {row[1] for row in changes}
+                        resources -= self._sse_last_notified
+                        for resource in sorted(resources):
+                            self._send_event(resource)
+                        self._sse_last_notified = set()
+                    self.wfile.write(b": keepalive\n\n"); self.wfile.flush()
             except Exception:
                 if self in self.clients: self.clients.remove(self)
+            finally:
+                self._sse_connection.close()
+                self._sse_connection = None
             return
         if self.path not in ("/api/overview", "/api/calls", "/api/sessions"):
             if self.path.startswith("/api/"): self.send_error(404); return
@@ -478,16 +580,58 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def purge(path, retention_days=DEFAULT_RETENTION_DAYS, timeout=DEFAULT_DB_TIMEOUT):
-    if retention_days <= 0:
-        raise ValueError("retention_days must be positive")
+    from .database import purge_calls
     connection = db(path, timeout)
-    ids = [row[0] for row in connection.execute("SELECT id FROM calls WHERE julianday(created_at) < julianday('now', ?)", (f"-{retention_days} days",))]
-    for call_id in ids:
-        attempt_ids = [row[0] for row in connection.execute("SELECT id FROM attempts WHERE call_id=?", (call_id,))]
-        for attempt_id in attempt_ids:
-            connection.execute("DELETE FROM usage WHERE attempt_id=?", (attempt_id,)); connection.execute("DELETE FROM payloads WHERE attempt_id=?", (attempt_id,))
-        connection.execute("DELETE FROM attempts WHERE call_id=?", (call_id,)); connection.execute("DELETE FROM calls WHERE id=?", (call_id,))
-    connection.commit(); connection.close(); return len(ids)
+    count = purge_calls(connection, retention_days)
+    connection.commit()
+    connection.close()
+    return count
+
+
+class GatewayHTTPServer(ThreadingHTTPServer):
+    """Threading server with explicit ownership of the retention worker."""
+
+    daemon_threads = True
+
+    def handle_error(self, request, client_address):
+        exc_type = sys.exc_info()[0]
+        if exc_type in (BrokenPipeError, ConnectionResetError, TimeoutError):
+            return
+        super().handle_error(request, client_address)
+
+    def server_close(self):
+        stop_purge_worker(self)
+        super().server_close()
+
+
+def start_purge_worker(server, path, retention_days=DEFAULT_RETENTION_DAYS, interval=DEFAULT_PURGE_INTERVAL, timeout=DEFAULT_DB_TIMEOUT):
+    stop = threading.Event()
+
+    def run():
+        while not stop.wait(max(0.01, float(interval))):
+            try:
+                purge(path, retention_days, timeout)
+            except Exception:
+                # A transient SQLite lock must not terminate the gateway's cleanup loop.
+                continue
+
+    thread = threading.Thread(target=run, name="prompt-harbor-purge", daemon=True)
+    server._purge_stop = stop
+    server._purge_thread = thread
+    thread.start()
+    return thread
+
+
+def stop_purge_worker(server):
+    stop = getattr(server, "_purge_stop", None)
+    thread = getattr(server, "_purge_thread", None)
+    if stop is None:
+        return
+    stop.set()
+    if thread is not None and thread is not threading.current_thread():
+        thread.join(timeout=2)
+    server._purge_stop = None
+    server._purge_thread = None
 
 
 def _add_config_options(parser, suppress=False):
@@ -506,6 +650,7 @@ def _add_config_options(parser, suppress=False):
     parser.add_argument("--api-call-limit", dest="api_call_limit", type=int, default=default)
     parser.add_argument("--cli-call-limit", dest="cli_call_limit", type=int, default=default)
     parser.add_argument("--sse-keepalive", dest="sse_keepalive", type=float, default=default)
+    parser.add_argument("--purge-interval", dest="purge_interval", type=float, default=default)
     parser.add_argument("--ui", dest="ui_path", default=default)
     parser.add_argument("--pi-sidecar-url", dest="pi_sidecar_url", default=default)
     parser.add_argument("--pi-sidecar-command", dest="pi_sidecar_command", default=default)
@@ -550,10 +695,12 @@ def main(argv=None):
         if manager.configured: configured_sidecar = manager.start()
     except SidecarStartupError as exc:
         print("pi-ai sidecar unavailable:", exc, file=sys.stderr)
+    Handler.clients = []
     Handler.db_path = path; Handler.upstream = settings.upstream; Handler.sidecar_url = configured_sidecar; Handler.sidecar_token = settings.sidecar_token; Handler.session_id = session_id
     Handler.db_timeout = settings.db_timeout; Handler.capture_max_body = settings.max_body; Handler.upstream_timeout = settings.upstream_timeout; Handler.sidecar_timeout = settings.sidecar_timeout; Handler.sse_keepalive = settings.sse_keepalive; Handler.api_call_limit = settings.api_call_limit; Handler.ui_path = settings.ui_path
-    host, port = settings.listen.rsplit(":", 1); print(f"gateway listening on http://{settings.listen}, upstream {settings.upstream}", flush=True); purge(path, settings.retention_days, settings.db_timeout)
-    server = ThreadingHTTPServer((host, int(port)), Handler)
+    host, port = validate_listen(settings.listen); print(f"gateway listening on http://{settings.listen}, upstream {settings.upstream}", flush=True); purge(path, settings.retention_days, settings.db_timeout)
+    server = GatewayHTTPServer((host, port), Handler)
+    start_purge_worker(server, path, settings.retention_days, settings.purge_interval, settings.db_timeout)
     try: server.serve_forever()
     finally: server.server_close(); manager.stop()
 

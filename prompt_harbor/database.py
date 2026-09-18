@@ -1,12 +1,11 @@
-import sqlite3
 from .config import DEFAULT_DB_TIMEOUT, DEFAULT_RETENTION_DAYS
 
 def connect(path, timeout=DEFAULT_DB_TIMEOUT):
-    c = sqlite3.connect(path, timeout=timeout)
-    c.row_factory = sqlite3.Row
-    return c
+    from .core import db
+    return db(path, timeout)
 
 def purge_calls(c, retention_days=DEFAULT_RETENTION_DAYS, cutoff_sql=None):
+    """Canonical SQL cascade used by compatibility callers with an open DB."""
     if retention_days <= 0:
         raise ValueError("retention_days must be positive")
     if cutoff_sql is not None:
