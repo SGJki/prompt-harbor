@@ -1,0 +1,23 @@
+# Copy this file to prompt-harbor.ini, or pass --config /path/to/file.
+# Precedence: CLI option > environment variable > this file > built-in default.
+
+[gateway]
+database = gateway.db
+listen = 127.0.0.1:8787
+upstream = https://api.openai.com
+max_body = 10485760
+retention_days = 2
+db_timeout = 30
+upstream_timeout = 600
+sidecar_timeout = 10
+sidecar_start_timeout = 5
+sidecar_stop_timeout = 2
+api_call_limit = 200
+cli_call_limit = 50
+sse_keepalive = 15
+# ui_path = /path/to/index.html
+
+[sidecar]
+# url = http://127.0.0.1:8790
+# command = node sidecar/server.mjs
+# token = replace-with-local-sidecar-token

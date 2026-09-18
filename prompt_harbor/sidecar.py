@@ -22,11 +22,13 @@ class SidecarProcess:
         url: Optional[str] = None,
         command: Optional[Union[str, Iterable[str]]] = None,
         timeout: float = 5.0,
+        stop_timeout: float = 2.0,
         env: Optional[dict[str, str]] = None,
     ) -> None:
         self.url = url.rstrip("/") if url else None
         self.command = command
         self.timeout = timeout
+        self.stop_timeout = stop_timeout
         self.env = env
         self.process: Optional[subprocess.Popen[str]] = None
 
@@ -83,8 +85,8 @@ class SidecarProcess:
         if self.process.poll() is None:
             self.process.terminate()
             try:
-                self.process.wait(timeout=2)
+                self.process.wait(timeout=self.stop_timeout)
             except subprocess.TimeoutExpired:
                 self.process.kill()
-                self.process.wait(timeout=2)
+                self.process.wait(timeout=self.stop_timeout)
         self.process = None

@@ -4,3 +4,4 @@ __pycache__/
 *.DS_Store
 *.egg-info/
 sidecar/node_modules/
+prompt-harbor.ini

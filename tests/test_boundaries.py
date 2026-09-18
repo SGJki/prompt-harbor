@@ -77,15 +77,16 @@ def test_legacy_usage_names_are_returned_by_detail_api(tmp_path):
         proc.terminate(); proc.wait(timeout=3); up.shutdown()
 
 
-def test_invalid_max_body_is_known_defect_but_gateway_process_survives(tmp_path):
-    up = ThreadingHTTPServer(('127.0.0.1', 0), JsonUpstream); threading.Thread(target=up.serve_forever, daemon=True).start(); proc, port, db = run_gateway(tmp_path, up, {'PROMPT_HARBOR_MAX_BODY': 'not-an-integer'})
-    try:
-        c = http.client.HTTPConnection('127.0.0.1', port, timeout=2); c.request('POST', '/v1/responses', b'{}')
-        try:
-            r = c.getresponse(); r.read()
-        except (http.client.HTTPException, OSError):
-            pass
-        c.close(); time.sleep(.1); assert proc.poll() is None
-    finally:
-        proc.terminate(); stdout, stderr = proc.communicate(timeout=3); up.shutdown()
-        assert 'ValueError' in stderr
+def test_invalid_max_body_is_rejected_at_startup(tmp_path):
+    database = tmp_path / 'g.db'
+    environment = dict(os.environ, PROMPT_HARBOR_MAX_BODY='not-an-integer')
+    proc = subprocess.Popen(
+        [sys.executable, 'prompt_harbor.py', 'start', '--database', str(database), '--listen', '127.0.0.1:0'],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=environment,
+    )
+    stdout, stderr = proc.communicate(timeout=3)
+    assert proc.returncode != 0
+    assert 'max_body' in stderr

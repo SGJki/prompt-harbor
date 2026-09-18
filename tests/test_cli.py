@@ -1,5 +1,7 @@
+import argparse
 import os, subprocess, sys, sqlite3
 import prompt_harbor as g
+from prompt_harbor.config import ConfigError, load_settings
 def test_global_help_exit_code():
  r=subprocess.run([sys.executable,'prompt_harbor.py','--help'],capture_output=True,text=True); assert r.returncode==0
 def test_unknown_command_nonzero():
@@ -18,3 +20,31 @@ def test_cli_argument_overrides_environment(tmp_path):
  env_path=tmp_path/'env.db'; arg_path=tmp_path/'arg.db'; env=dict(os.environ,PROMPT_HARBOR_DB=str(env_path)); r=subprocess.run([sys.executable,'prompt_harbor.py','init','--database',str(arg_path)],env=env,capture_output=True,text=True); assert r.returncode==0 and arg_path.exists() and not env_path.exists()
 def test_environment_overrides_default(tmp_path):
  env_path=tmp_path/'env.db'; env=dict(os.environ,PROMPT_HARBOR_DB=str(env_path)); r=subprocess.run([sys.executable,'prompt_harbor.py','init'],env=env,capture_output=True,text=True); assert r.returncode==0 and env_path.exists()
+
+def test_config_file_values_are_loaded(tmp_path):
+ cfg=tmp_path/'gateway.ini'; cfg.write_text('[gateway]\ndatabase = config.db\nretention_days = 7\nmax_body = 123\n[sidecar]\nurl = http://127.0.0.1:8790\n', encoding='utf-8')
+ settings=load_settings(argparse.Namespace(config=str(cfg)))
+ assert settings.database == 'config.db' and settings.retention_days == 7 and settings.max_body == 123
+ assert settings.sidecar_url == 'http://127.0.0.1:8790'
+
+def test_config_file_is_used_by_cli(tmp_path):
+ cfg=tmp_path/'gateway.ini'; database=tmp_path/'configured.db'; cfg.write_text(f'[gateway]\ndatabase = {database}\n', encoding='utf-8')
+ result=subprocess.run([sys.executable, 'prompt_harbor.py', 'init', '--config', str(cfg)], capture_output=True, text=True)
+ assert result.returncode == 0 and database.exists()
+
+def test_cli_and_environment_override_config_file(tmp_path, monkeypatch):
+ cfg=tmp_path/'gateway.ini'; cfg.write_text('[gateway]\ndatabase = config.db\nmax_body = 123\n', encoding='utf-8')
+ monkeypatch.setenv('PROMPT_HARBOR_DB', 'env.db')
+ settings=load_settings(argparse.Namespace(config=str(cfg), database='cli.db'))
+ assert settings.database == 'cli.db'
+ settings=load_settings(argparse.Namespace(config=str(cfg)))
+ assert settings.database == 'env.db'
+
+def test_invalid_config_value_is_reported(tmp_path):
+ cfg=tmp_path/'gateway.ini'; cfg.write_text('[gateway]\nretention_days = no\n', encoding='utf-8')
+ try:
+  load_settings(argparse.Namespace(config=str(cfg)))
+ except ConfigError as exc:
+  assert 'retention_days' in str(exc)
+ else:
+  raise AssertionError('invalid configuration was accepted')

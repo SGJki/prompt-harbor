@@ -11,7 +11,35 @@ prompt-harbor --database gateway.db start
 OPENAI_BASE_URL=http://127.0.0.1:8787/v1 codex
 ```
 
-配置优先级为 CLI 参数、环境变量（`PROMPT_HARBOR_DB`、`PROMPT_HARBOR_LISTEN`、`PROMPT_HARBOR_UPSTREAM`）、默认值。默认监听 `127.0.0.1:8787`，上游为 `https://api.openai.com`。
+默认监听 `127.0.0.1:8787`，上游为 `https://api.openai.com`。完整的配置文件和覆盖规则见下节。
+
+## 配置文件
+
+网关默认查找当前目录的 `prompt-harbor.ini`；也可以通过 `--config` 或 `PROMPT_HARBOR_CONFIG` 指定路径。示例配置见 `prompt-harbor.ini.example`。配置优先级为：CLI 参数 > 环境变量 > INI 文件 > 内置默认值。未创建配置文件时仍使用以下默认值：
+
+```ini
+[gateway]
+database = gateway.db
+listen = 127.0.0.1:8787
+upstream = https://api.openai.com
+max_body = 10485760
+retention_days = 2
+db_timeout = 30
+upstream_timeout = 600
+sidecar_timeout = 10
+sidecar_start_timeout = 5
+sidecar_stop_timeout = 2
+api_call_limit = 200
+cli_call_limit = 50
+sse_keepalive = 15
+
+[sidecar]
+# url = http://127.0.0.1:8790
+# command = node sidecar/server.mjs
+# token = local-token
+```
+
+例如：`prompt-harbor --config ./prompt-harbor.ini start`。`max_body` 控制保存到 SQLite 的 request/response 前缀大小；认证 token 等敏感值不要提交到版本库。
 
 ## pi-ai sidecar
 

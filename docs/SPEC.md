@@ -102,6 +102,8 @@ uv run python -m prompt_harbor purge
 
 `list` 显示时间、路径、模型、状态、耗时、输入/输出大小和 event ID。`show` 显示完整请求与响应内容，并明确标识流式响应和错误。
 
+运行时配置支持当前目录的 `prompt-harbor.ini`，也可通过 `--config` 或 `PROMPT_HARBOR_CONFIG` 指定文件。覆盖优先级为 CLI 参数、环境变量、INI 文件、内置默认值。配置文件使用 `[gateway]` 和 `[sidecar]` 两个 section；默认值和可配置项见 `prompt-harbor.ini.example`。
+
 ## 7. 性能与正确性要求
 
 - SSE chunk 转发不等待完整响应。
