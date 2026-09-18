@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 import sqlite3
+import stat
 import sys
 import threading
 import time
@@ -27,9 +28,12 @@ from .config import (
     DEFAULT_UPSTREAM,
     DEFAULT_UPSTREAM_TIMEOUT,
     ConfigError,
+    CONFIG_FIELDS,
     load_settings,
+    settings_values,
     validate_listen,
     validate_upstream,
+    write_config,
 )
 from .headers import sanitize
 from .pi_messages import PiMessagesState, normalize_usage, split_model_id
@@ -37,9 +41,11 @@ from .sidecar import SidecarProcess, SidecarStartupError
 
 CONTENT_TYPES = {".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8", ".js": "text/javascript; charset=utf-8"}
 HOP_BY_HOP = {"transfer-encoding", "connection", "content-length"}
+REDIRECT_STATUSES = {301, 302, 303, 307, 308}
 DEFAULT_DB = DEFAULT_DB
 DEFAULT_LISTEN = DEFAULT_LISTEN
 DEFAULT_UPSTREAM = DEFAULT_UPSTREAM
+CONFIG_LOCK = threading.RLock()
 
 
 class NoRedirectHandler(HTTPRedirectHandler):
@@ -117,8 +123,11 @@ def init(path, timeout=DEFAULT_DB_TIMEOUT):
     # private even when the process inherits a permissive umask.
     try:
         os.chmod(path, 0o600)
-    except OSError:
-        pass
+        mode = stat.S_IMODE(os.stat(path).st_mode)
+        if mode != 0o600:
+            raise PermissionError(f"database mode is {oct(mode)}, expected 0o600")
+    except OSError as exc:
+        raise ConfigError(f"cannot secure database file {path}: {exc}") from exc
 
 
 def headers(header_map):
@@ -173,6 +182,9 @@ class Handler(BaseHTTPRequestHandler):
     api_call_limit = DEFAULT_API_CALL_LIMIT
     ui_path = None
     security_warnings = ()
+    config_path = "prompt-harbor.ini"
+    config_settings = {}
+    gateway_server = None
 
     @staticmethod
     def _json_error(status, message):
@@ -197,6 +209,19 @@ class Handler(BaseHTTPRequestHandler):
         for key in list(self.headers):
             if key.lower() in {"authorization", "proxy-authorization"}:
                 del self.headers[key]
+
+    def _reject_redirect(self, response, record, error_type="upstream_redirect"):
+        """Never expose an upstream Location to clients that may follow it."""
+        if response.status not in REDIRECT_STATUSES:
+            return False
+        record["status"] = 502
+        record["state"] = "failed"
+        record["error_type"] = error_type
+        record["error_message"] = "upstream redirect refused"
+        record["response_complete"] = True
+        self.send_error(502, "upstream redirect refused")
+        self.close_connection = True
+        return True
 
     def _request_metadata(self, body):
         model = None
@@ -351,10 +376,13 @@ class Handler(BaseHTTPRequestHandler):
             except HTTPError as exc:
                 response = exc
             finally:
+                request_headers.clear()
                 self._forget_authorization()
             record["status"] = response.status
             record["response_headers"] = headers(response.headers)
             record["response_content_type"] = response.headers.get("Content-Type")
+            if self._reject_redirect(response, record):
+                return
             self.send_response(response.status)
             for key, value in response.headers.items():
                 if key.lower() not in HOP_BY_HOP:
@@ -427,10 +455,13 @@ class Handler(BaseHTTPRequestHandler):
             except HTTPError as exc:
                 response = exc
             finally:
+                request_headers.clear()
                 self._forget_authorization()
             record["status"] = response.status
             record["response_headers"] = headers(response.headers)
             record["response_content_type"] = response.headers.get("Content-Type")
+            if self._reject_redirect(response, record, "sidecar_redirect"):
+                return
             self.send_response(response.status)
             for key, value in response.headers.items():
                 if key.lower() not in HOP_BY_HOP:
@@ -534,6 +565,9 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/health":
             self._proxy_sidecar_get("/health")
             return
+        if self.path == "/api/config":
+            self._send_config()
+            return
         if self.path in ("/", "/index.html"):
             path = self.ui_path or os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "ui", "index.html")
             try:
@@ -596,6 +630,41 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/api/sessions": payload = {"sessions": sessions}
         raw = json.dumps(payload, ensure_ascii=False).encode(); self.send_response(200); self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(raw))); self.end_headers(); self.wfile.write(raw)
 
+    def do_PUT(self):
+        if self.path != "/api/config":
+            self.send_error(404)
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0") or 0)
+            if length > 1024 * 1024:
+                raise ValueError("configuration payload is too large")
+            payload = json.loads(self.rfile.read(max(0, length)))
+            if not isinstance(payload, dict):
+                raise ValueError("configuration payload must be an object")
+            result = update_runtime_config(payload)
+        except (ConfigError, ValueError, TypeError, json.JSONDecodeError) as exc:
+            raw = self._json_error(400, str(exc))
+            self.send_response(400); self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(raw))); self.end_headers(); self.wfile.write(raw)
+            return
+        raw = json.dumps(result, ensure_ascii=False).encode()
+        self.send_response(200); self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(raw))); self.end_headers(); self.wfile.write(raw)
+
+    def _send_config(self):
+        values = dict(self.config_settings)
+        fields = {}
+        for name, spec in CONFIG_FIELDS.items():
+            value = values.get(name)
+            fields[name] = {
+                "value": None if spec.get("secret") else value,
+                "configured": bool(value) if spec.get("secret") else True,
+                "restart_required": spec["restart_required"],
+                "section": spec["section"],
+                "key": spec["key"],
+                "secret": bool(spec.get("secret")),
+            }
+        raw = json.dumps({"path": self.config_path, "fields": fields}, ensure_ascii=False).encode()
+        self.send_response(200); self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(raw))); self.end_headers(); self.wfile.write(raw)
+
     def _proxy_sidecar_get(self, path):
         if not self.sidecar_url:
             self.send_error(503, "pi-ai sidecar unavailable"); return
@@ -627,6 +696,77 @@ class Handler(BaseHTTPRequestHandler):
 
     def log_message(self, *args):
         pass
+
+
+def _config_updates(payload):
+    """Flatten either the UI's sectioned payload or a flat API payload."""
+    updates = {}
+    for field, spec in CONFIG_FIELDS.items():
+        if field in payload:
+            updates[field] = payload[field]
+            continue
+        section = payload.get(spec["section"])
+        if isinstance(section, dict) and spec["key"] in section:
+            updates[field] = section[spec["key"]]
+    return updates
+
+
+def _apply_runtime_settings(settings):
+    """Apply settings whose resources are owned by the running gateway."""
+    Handler.upstream = settings.upstream
+    Handler.security_warnings = settings.upstream_warnings
+    Handler.capture_max_body = settings.max_body
+    Handler.db_timeout = settings.db_timeout
+    Handler.upstream_timeout = settings.upstream_timeout
+    Handler.sidecar_timeout = settings.sidecar_timeout
+    Handler.sse_keepalive = settings.sse_keepalive
+    Handler.api_call_limit = settings.api_call_limit
+    Handler.ui_path = settings.ui_path
+    server = Handler.gateway_server
+    if server is not None:
+        server._purge_config.update({
+            "retention_days": settings.retention_days,
+            "interval": settings.purge_interval,
+            "timeout": settings.db_timeout,
+        })
+
+
+def update_runtime_config(payload):
+    with CONFIG_LOCK:
+        return _update_runtime_config(payload)
+
+
+def _update_runtime_config(payload):
+    """Persist a partial configuration update and hot-apply safe fields."""
+    updates = _config_updates(payload)
+    if not updates:
+        raise ConfigError("configuration update is empty")
+    values = dict(Handler.config_settings)
+    if not values:
+        raise ConfigError("gateway configuration is not initialized")
+    for field, value in updates.items():
+        if field == "sidecar_token" and value == "":
+            value = None
+        if value is not None and not isinstance(value, (str, int, float, bool)):
+            raise ConfigError(f"{field} has invalid value: {value!r}")
+        values[field] = value
+    settings = write_config(Handler.config_path, values)
+    Handler.config_settings = settings_values(settings)
+    _apply_runtime_settings(settings)
+    if "sidecar_url" in updates:
+        Handler.sidecar_url = settings.sidecar_url
+    if "sidecar_token" in updates:
+        Handler.sidecar_token = settings.sidecar_token
+    restart_required = sorted(field for field in updates if CONFIG_FIELDS[field]["restart_required"])
+    public = {
+        field: {"value": None if CONFIG_FIELDS[field].get("secret") else getattr(settings, field),
+                "configured": bool(getattr(settings, field)) if CONFIG_FIELDS[field].get("secret") else True,
+                "restart_required": CONFIG_FIELDS[field]["restart_required"],
+                "section": CONFIG_FIELDS[field]["section"], "key": CONFIG_FIELDS[field]["key"],
+                "secret": bool(CONFIG_FIELDS[field].get("secret"))}
+        for field in CONFIG_FIELDS
+    }
+    return {"path": Handler.config_path, "fields": public, "restart_required": restart_required}
 
 
 def purge(path, retention_days=DEFAULT_RETENTION_DAYS, timeout=DEFAULT_DB_TIMEOUT):
@@ -672,11 +812,13 @@ class GatewayHTTPServer(ThreadingHTTPServer):
 
 def start_purge_worker(server, path, retention_days=DEFAULT_RETENTION_DAYS, interval=DEFAULT_PURGE_INTERVAL, timeout=DEFAULT_DB_TIMEOUT):
     stop = threading.Event()
+    server._purge_config = {"retention_days": retention_days, "interval": interval, "timeout": timeout}
 
     def run():
-        while not stop.wait(max(0.01, float(interval))):
+        while not stop.wait(max(0.01, float(server._purge_config["interval"]))):
             try:
-                purge(path, retention_days, timeout)
+                config = server._purge_config
+                purge(path, config["retention_days"], config["timeout"])
             except Exception:
                 # A transient SQLite lock must not terminate the gateway's cleanup loop.
                 continue
@@ -764,11 +906,14 @@ def main(argv=None):
     Handler.clients = []
     Handler.db_path = path; Handler.upstream = settings.upstream; Handler.security_warnings = settings.upstream_warnings; Handler.sidecar_url = configured_sidecar; Handler.sidecar_token = settings.sidecar_token; Handler.session_id = session_id
     Handler.db_timeout = settings.db_timeout; Handler.capture_max_body = settings.max_body; Handler.upstream_timeout = settings.upstream_timeout; Handler.sidecar_timeout = settings.sidecar_timeout; Handler.sse_keepalive = settings.sse_keepalive; Handler.api_call_limit = settings.api_call_limit; Handler.ui_path = settings.ui_path
+    Handler.config_path = settings.config_path
+    Handler.config_settings = settings_values(settings)
     host, port = validate_listen(settings.listen); print(f"gateway listening on http://{settings.listen}, upstream {settings.upstream}", flush=True)
     for warning in settings.upstream_warnings:
         print("WARNING: " + warning, file=sys.stderr, flush=True)
     purge(path, settings.retention_days, settings.db_timeout)
     server = GatewayHTTPServer((host, port), Handler)
+    Handler.gateway_server = server
     start_purge_worker(server, path, settings.retention_days, settings.purge_interval, settings.db_timeout)
     try: server.serve_forever()
     finally: server.server_close(); manager.stop()

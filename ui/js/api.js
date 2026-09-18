@@ -24,3 +24,28 @@ export async function getJSON(path, { signal, timeout = 10000 } = {}) {
     clearTimeout(timer);
   }
 }
+
+export async function putJSON(path, body, { signal, timeout = 10000 } = {}) {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), timeout);
+  if (signal) {
+    if (signal.aborted) ctl.abort();
+    else signal.addEventListener('abort', () => ctl.abort(), { once: true });
+  }
+  try {
+    const res = await fetch(path, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: ctl.signal,
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new ApiError(data?.error?.message || `HTTP ${res.status}`, res.status);
+    return data;
+  } catch (err) {
+    if (err.name === 'AbortError' || err instanceof ApiError) throw err;
+    throw new ApiError(err.message || 'network error');
+  } finally {
+    clearTimeout(timer);
+  }
+}

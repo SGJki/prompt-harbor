@@ -9,7 +9,9 @@
 | iteration-3 | `closed` | 完成周期清理、loopback 监听校验、请求级 body 错误、入口一致性、SSE 通知和浏览器回归。 | [PROGRESS](./iteration-3/PROGRESS.md) · [BLOCKED](./iteration-3/BLOCKED.md) |
 | iteration-4 | `closed` | 修复 sessions SSE 通知、change-log 并发游标窗口和无限增长，补齐 92 项测试验收。 | [PROGRESS](./iteration-4/PROGRESS.md) · [BLOCKED](./iteration-4/BLOCKED.md) |
 | iteration-5 | `closed` | 知识与治理收尾：同步规格、测试矩阵、sidecar 方案、路线图和工作区规则。 | [PROGRESS](./iteration-5/PROGRESS.md) · [BLOCKED](./iteration-5/BLOCKED.md) |
-| iteration-6 | `active` | 收紧透明代理 API key 安全边界：上游 URL 校验与告警、重定向凭证保护、UI/健康状态说明及回归测试。 | [PROGRESS](./iteration-6/PROGRESS.md) · [BLOCKED](./iteration-6/BLOCKED.md) |
+| iteration-6 | `closed` | 收紧透明代理 API key 安全边界：上游 URL 校验与告警、重定向凭证保护、UI/健康状态说明及回归测试。 | [PROGRESS](./iteration-6/PROGRESS.md) · [BLOCKED](./iteration-6/BLOCKED.md) |
+| iteration-7 | `closed` | 内置审计台 Configuration Tab：编辑 `prompt-harbor.ini`、原子持久化、安全字段脱敏和运行时热更新。 | [PROGRESS](./iteration-7/PROGRESS.md) · [BLOCKED](./iteration-7/BLOCKED.md) |
+| iteration-8 | `closed` | 安全审查修复：权限收紧失败终止、重定向响应隔离、认证字典及时清理、上游端口校验和规范化 origin 告警。 | [PROGRESS](./iteration-8/PROGRESS.md) · [BLOCKED](./iteration-8/BLOCKED.md) |
 
 ## Maintenance
 

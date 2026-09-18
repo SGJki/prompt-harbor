@@ -1,4 +1,4 @@
-import { getJSON } from './api.js';
+import { getJSON, putJSON } from './api.js';
 
 const emptyDetail = () => ({ callId: null, loading: false, error: null, data: null });
 
@@ -14,6 +14,11 @@ export const state = {
   filters: { status: 'all', session: 'all', q: '' },
   conn: 'poll',
   securityWarnings: [],
+  config: { path: '', fields: {} },
+  configLoading: false,
+  configSaving: false,
+  configError: null,
+  configNotice: null,
 };
 
 const listeners = new Set();
@@ -51,13 +56,14 @@ export async function load() {
   loadCtl = ctl;
   const seq = ++loadSeq;
   const tab = state.tab;
-  const endpoint = tab === 'sessions' ? '/api/sessions' : '/api/overview';
+  const endpoint = tab === 'sessions' ? '/api/sessions' : tab === 'config' ? '/api/config' : '/api/overview';
   set({ loading: true, error: null });
   emit('status');
   try {
     const data = await getJSON(endpoint, { signal: ctl.signal });
     if (seq !== loadSeq) return;
-    if (tab === 'sessions') set({ sessions: data.sessions || [] });
+    if (tab === 'config') set({ config: data, configLoading: false, configError: null });
+    else if (tab === 'sessions') set({ sessions: data.sessions || [] });
     else set({ calls: data.calls || [], sessions: data.sessions || [], securityWarnings: data.security_warnings || [] });
     set({ lastUpdated: new Date() });
     emit('data');
@@ -73,6 +79,19 @@ export async function load() {
       pendingReload = false;
       load();
     }
+  }
+}
+
+export async function saveConfig(payload) {
+  set({ configSaving: true, configError: null, configNotice: null });
+  emit('config');
+  try {
+    const data = await putJSON('/api/config', payload);
+    set({ config: data, configSaving: false, configError: null, configNotice: data.restart_required || [] });
+    emit('config');
+  } catch (err) {
+    set({ configSaving: false, configError: err.message || 'request failed' });
+    emit('config');
   }
 }
 

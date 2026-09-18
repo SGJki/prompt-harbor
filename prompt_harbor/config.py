@@ -6,6 +6,7 @@ import argparse
 import configparser
 import ipaddress
 import os
+import tempfile
 from urllib.parse import urlsplit
 from dataclasses import dataclass
 from typing import Callable, Optional, TypeVar
@@ -49,7 +50,13 @@ def validate_upstream(value: str) -> tuple[str, ...]:
         raise ConfigError("upstream must not contain query parameters")
     if parsed.fragment:
         raise ConfigError("upstream must not contain a URL fragment")
-    hostname = parsed.hostname.lower().rstrip(".")
+    try:
+        hostname = parsed.hostname.lower().rstrip(".")
+        port = parsed.port
+    except ValueError as exc:
+        raise ConfigError("upstream has invalid host or port") from exc
+    if port is not None and not 1 <= port <= 65535:
+        raise ConfigError("upstream has invalid port")
     loopback = hostname == "localhost"
     if not loopback:
         try:
@@ -61,7 +68,8 @@ def validate_upstream(value: str) -> tuple[str, ...]:
     warnings = []
     if parsed.scheme == "http":
         warnings.append("upstream uses unencrypted HTTP; this is allowed only because it targets loopback")
-    elif hostname != "api.openai.com":
+    normalized_origin = (parsed.scheme.lower(), hostname, port or (443 if parsed.scheme == "https" else 80))
+    if parsed.scheme != "http" and normalized_origin != ("https", "api.openai.com", 443):
         warnings.append(f"custom upstream {parsed.scheme}://{parsed.netloc} will receive Authorization headers")
     return tuple(warnings)
 
@@ -87,6 +95,34 @@ class Settings:
     sidecar_command: Optional[str] = None
     sidecar_token: Optional[str] = None
     upstream_warnings: tuple[str, ...] = ()
+    config_path: str = DEFAULT_CONFIG
+
+
+# The UI and the INI writer use this single source of truth.  Values marked
+# restart_required remain editable, but their new value is applied on the next
+# process start because changing them in-place would break resource ownership.
+CONFIG_FIELDS = {
+    "database": {"section": "gateway", "key": "database", "kind": "string", "restart_required": True},
+    "listen": {"section": "gateway", "key": "listen", "kind": "string", "restart_required": True},
+    "upstream": {"section": "gateway", "key": "upstream", "kind": "string", "restart_required": False},
+    "max_body": {"section": "gateway", "key": "max_body", "kind": "integer", "restart_required": False},
+    "retention_days": {"section": "gateway", "key": "retention_days", "kind": "integer", "restart_required": False},
+    "db_timeout": {"section": "gateway", "key": "db_timeout", "kind": "number", "restart_required": False},
+    "upstream_timeout": {"section": "gateway", "key": "upstream_timeout", "kind": "number", "restart_required": False},
+    "sidecar_timeout": {"section": "gateway", "key": "sidecar_timeout", "kind": "number", "restart_required": False},
+    "sidecar_start_timeout": {"section": "gateway", "key": "sidecar_start_timeout", "kind": "number", "restart_required": True},
+    "sidecar_stop_timeout": {"section": "gateway", "key": "sidecar_stop_timeout", "kind": "number", "restart_required": True},
+    "api_call_limit": {"section": "gateway", "key": "api_call_limit", "kind": "integer", "restart_required": False},
+    "cli_call_limit": {"section": "gateway", "key": "cli_call_limit", "kind": "integer", "restart_required": True},
+    "sse_keepalive": {"section": "gateway", "key": "sse_keepalive", "kind": "number", "restart_required": False},
+    "purge_interval": {"section": "gateway", "key": "purge_interval", "kind": "number", "restart_required": False},
+    "ui_path": {"section": "gateway", "key": "ui_path", "kind": "optional", "restart_required": False},
+    "sidecar_url": {"section": "sidecar", "key": "url", "kind": "optional", "restart_required": False},
+    "sidecar_command": {"section": "sidecar", "key": "command", "kind": "optional", "restart_required": True},
+    "sidecar_token": {"section": "sidecar", "key": "token", "kind": "optional", "restart_required": False, "secret": True},
+}
+
+CLI_FIELD_NAMES = {"sidecar_url": "pi_sidecar_url", "sidecar_command": "pi_sidecar_command", "sidecar_token": "pi_sidecar_token"}
 
 
 T = TypeVar("T")
@@ -173,7 +209,56 @@ def load_settings(cli: argparse.Namespace) -> Settings:
         sidecar_url=optional("pi_sidecar_url", "sidecar", "url", "PROMPT_HARBOR_PI_SIDECAR_URL"),
         sidecar_command=optional("pi_sidecar_command", "sidecar", "command", "PROMPT_HARBOR_PI_SIDECAR_COMMAND"),
         sidecar_token=optional("pi_sidecar_token", "sidecar", "token", "PROMPT_HARBOR_MESSAGES_TOKEN"),
+        config_path=config_path,
     )
+
+
+def settings_values(settings: Settings) -> dict[str, object]:
+    """Return the complete editable value set for runtime/config updates."""
+    return {field: getattr(settings, field) for field in CONFIG_FIELDS}
+
+
+def validate_values(values: dict[str, object]) -> Settings:
+    """Validate a complete value set using the same parser as startup."""
+    cli = argparse.Namespace(config=None)
+    for field in CONFIG_FIELDS:
+        value = values.get(field)
+        if value is None and CONFIG_FIELDS[field]["kind"] == "optional":
+            value = ""
+        setattr(cli, CLI_FIELD_NAMES.get(field, field), value)
+    return load_settings(cli)
+
+
+def write_config(path: str, values: dict[str, object]) -> Settings:
+    """Validate and atomically persist editable settings to an INI file."""
+    settings = validate_values(values)
+    parser = _read_config(path, explicit=False)
+    for field, spec in CONFIG_FIELDS.items():
+        parser.setdefault(spec["section"], {})
+        value = getattr(settings, field)
+        if value is None:
+            parser.remove_option(spec["section"], spec["key"])
+        else:
+            parser.set(spec["section"], spec["key"], str(value))
+    directory = os.path.dirname(os.path.abspath(path)) or "."
+    temporary = None
+    try:
+        fd, temporary = tempfile.mkstemp(prefix=".prompt-harbor-", suffix=".ini", dir=directory, text=True)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            parser.write(stream)
+        try:
+            os.chmod(temporary, 0o600)
+        except OSError:
+            pass
+        os.replace(temporary, path)
+    except OSError as exc:
+        if temporary:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+        raise ConfigError(f"cannot write configuration file {path}: {exc}") from exc
+    return settings
 
 
 def validate_listen(value: str) -> tuple[str, int]:

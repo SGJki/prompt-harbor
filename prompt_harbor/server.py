@@ -1,7 +1,7 @@
 """Gateway server construction and lifecycle."""
 from .proxy import Handler
 from .core import GatewayHTTPServer, db, init, iso, purge, start_purge_worker
-from .config import DEFAULT_DB_TIMEOUT, DEFAULT_PURGE_INTERVAL, DEFAULT_RETENTION_DAYS, validate_listen, validate_upstream
+from .config import DEFAULT_DB_TIMEOUT, DEFAULT_PURGE_INTERVAL, DEFAULT_RETENTION_DAYS, Settings, settings_values, validate_listen, validate_upstream
 
 def serve(listen, upstream, database, sidecar_url=None, sidecar_token=None, retention_days=DEFAULT_RETENTION_DAYS, purge_interval=DEFAULT_PURGE_INTERVAL, db_timeout=DEFAULT_DB_TIMEOUT):
     host, port = validate_listen(listen)
@@ -24,5 +24,9 @@ def serve(listen, upstream, database, sidecar_url=None, sidecar_token=None, rete
     Handler.db_timeout = db_timeout
     Handler.clients = []
     server = GatewayHTTPServer((host, port), Handler)
+    runtime = Settings(database=database, listen=listen, upstream=upstream, retention_days=retention_days, purge_interval=purge_interval, db_timeout=db_timeout, sidecar_url=sidecar_url, sidecar_token=sidecar_token, upstream_warnings=warnings)
+    Handler.config_path = runtime.config_path
+    Handler.config_settings = settings_values(runtime)
+    Handler.gateway_server = server
     start_purge_worker(server, database, retention_days, purge_interval, db_timeout)
     return server

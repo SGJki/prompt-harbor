@@ -48,6 +48,25 @@ button.link{background:none;border:0;color:#7fb0e8;cursor:pointer;padding:0;font
 #call-detail h3{margin-top:0}
 #call-detail h4{margin:16px 0 6px;color:#9fb3cb;font-size:12px;letter-spacing:.06em;text-transform:uppercase}
 #call-detail pre{margin:0;background:#0d1727;border:1px solid #243b58;border-radius:8px;padding:12px;font-size:12px;line-height:1.5;max-height:340px;overflow:auto;white-space:pre-wrap;word-break:break-word}
+.config-form .panel{margin-top:18px}
+.panel-heading{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:16px}
+.panel-heading h3{margin:0}
+.panel-heading p{margin:5px 0 0}
+.config-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px 20px}
+.config-field{display:flex;flex-direction:column;gap:6px;color:#b9cbe0;font-size:13px}
+.config-field input{width:100%;background:#0f1a2c;border:1px solid #2b4666;color:#dbe7f5;border-radius:7px;padding:9px 10px;font:inherit}
+.config-field input:focus{outline:1px solid #5c8ec4;border-color:#5c8ec4}
+.config-field small{font-size:11px}
+.config-badge{margin-left:6px;color:#e8b04c;font-size:10px;text-transform:uppercase;letter-spacing:.08em}
+.config-badge.live{color:#57c59a}
+.config-clear{display:flex;align-items:center;gap:6px;color:#7f9ab8;font-size:11px}
+.config-clear input{width:auto}
+.config-actions{display:flex;justify-content:flex-end;margin-top:18px}
+.config-actions button{background:#2a6b9f;color:#fff;border:0;border-radius:7px;padding:10px 16px;cursor:pointer;font:inherit}
+.config-actions button:hover:not(:disabled){background:#327eb6}
+.config-actions button:disabled{opacity:.55;cursor:default}
+.notice{margin-top:18px;background:#2c2415;border:1px solid #8d6724;color:#f0cf82;border-radius:8px;padding:11px 14px}
+.form-error{margin-top:18px;background:#2c1a21;border:1px solid #6b2934;color:#f0c6ce;border-radius:8px;padding:11px 14px}
 @media(max-width:650px){
 .side{width:70px;padding:18px 8px}
 .brand{font-size:0}
@@ -58,4 +77,5 @@ button.link{background:none;border:0;color:#7fb0e8;cursor:pointer;padding:0;font
 .main{padding:18px}
 .top{flex-wrap:wrap;gap:10px}
 .meta{display:none}
+.config-grid{grid-template-columns:1fr}
 }

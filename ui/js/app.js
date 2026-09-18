@@ -1,6 +1,6 @@
-import { state, subscribe, setTab, load, selectCall, loadDetail, setFilters, jumpToSession } from './store.js';
+import { state, subscribe, setTab, load, selectCall, loadDetail, setFilters, jumpToSession, saveConfig } from './store.js';
 import { startRealtime } from './realtime.js';
-import { overviewView, callsView, sessionsView, detailView, filterCalls, callTable } from './views.js';
+import { overviewView, callsView, sessionsView, configView, detailView, filterCalls, callTable } from './views.js';
 import { esc, fmtDateTime } from './format.js';
 
 const view = document.querySelector('#view');
@@ -10,13 +10,14 @@ const conn = document.querySelector('#conn');
 const banner = document.querySelector('#banner');
 const refreshBtn = document.querySelector('#refresh');
 
-const TITLES = { overview: 'Overview', calls: 'Calls', sessions: 'Sessions' };
+const TITLES = { overview: 'Overview', calls: 'Calls', sessions: 'Sessions', config: 'Configuration' };
 const CONN_LABEL = { live: 'live', poll: 'polling', off: 'offline' };
 
 function renderView() {
   title.textContent = TITLES[state.tab];
   if (state.tab === 'calls') view.innerHTML = callsView(state);
   else if (state.tab === 'sessions') view.innerHTML = sessionsView(state);
+  else if (state.tab === 'config') view.innerHTML = configView(state);
   else view.innerHTML = overviewView(state);
   bindRowActions();
   updateDetail();
@@ -70,6 +71,9 @@ subscribe(type => {
     if (state.tab === 'calls') updateRows();
     else renderView();
   } else if (type === 'filters') updateRows();
+  else if (type === 'config') {
+    if (state.tab === 'config') renderView();
+  }
   else if (type === 'detail' || type === 'selection') {
     updateRows();
     updateDetail();
@@ -95,6 +99,19 @@ view.addEventListener('click', e => {
   }
   const retry = e.target.closest('[data-retry]');
   if (retry) loadDetail(Number(retry.dataset.retry));
+});
+
+view.addEventListener('submit', e => {
+  if (e.target.id !== 'config-form') return;
+  e.preventDefault();
+  const values = {};
+  e.target.querySelectorAll('[data-config-field]').forEach(input => {
+    const name = input.dataset.configField;
+    const clear = e.target.querySelector(`[data-config-clear="${name}"]`);
+    if (clear?.checked) values[name] = null;
+    else if (input.type !== 'password' || input.value) values[name] = input.value;
+  });
+  saveConfig(values);
 });
 
 view.addEventListener('change', e => {
