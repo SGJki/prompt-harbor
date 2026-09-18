@@ -1,6 +1,7 @@
 import { state, subscribe, setTab, load, selectCall, loadDetail, setFilters, jumpToSession, saveConfig } from './store.js';
 import { startRealtime } from './realtime.js';
-import { overviewView, callsView, sessionsView, configView, detailView, filterCalls, callTable } from './views.js';
+import { overviewView, callsView, sessionsView, detailView, filterCalls, callTable } from './views.js';
+import { configView } from './config.js';
 import { esc, fmtDateTime } from './format.js';
 
 const view = document.querySelector('#view');
@@ -28,6 +29,12 @@ function bindRowActions() {
   view.querySelectorAll('.call-row').forEach(row => {
     const activate = () => selectCall(Number(row.dataset.callId));
     row.addEventListener('click', activate);
+    row.addEventListener('keydown', event => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        activate();
+      }
+    });
     row.querySelectorAll('td').forEach(cell => cell.addEventListener('click', event => {
       event.stopPropagation();
       activate();
@@ -81,7 +88,10 @@ subscribe(type => {
 });
 
 document.querySelectorAll('.nav button').forEach(b => b.addEventListener('click', () => {
-  document.querySelectorAll('.nav button').forEach(x => x.classList.toggle('active', x === b));
+  document.querySelectorAll('.nav button').forEach(x => {
+    x.classList.toggle('active', x === b);
+    x.setAttribute('aria-selected', x === b ? 'true' : 'false');
+  });
   setTab(b.dataset.tab);
 }));
 
@@ -105,7 +115,7 @@ view.addEventListener('submit', e => {
   if (e.target.id !== 'config-form') return;
   e.preventDefault();
   const values = {};
-  e.target.querySelectorAll('[data-config-field]').forEach(input => {
+  e.target.querySelectorAll('[data-config-field]:not(:disabled)').forEach(input => {
     const name = input.dataset.configField;
     const clear = e.target.querySelector(`[data-config-clear="${name}"]`);
     if (clear?.checked) values[name] = null;

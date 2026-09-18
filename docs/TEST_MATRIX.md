@@ -30,5 +30,7 @@
 | Direct SQLite calls/sessions SSE invalidation | `tests/test_iteration3.py::test_sse_notifies_direct_sql_calls_and_sessions` |
 | Sidecar credential redaction on request-level config failure | `tests/test_iteration3.py::test_sidecar_configuration_error_persists_only_scrubbed_body` |
 | Real browser UI workflow | `browser-tests/audit.spec.js` via `npm run test:browser` |
+| Iteration 10 Host allowlist, security headers and CSRF | `tests/test_iteration10.py::test_host_allowlist_and_security_headers`, `test_put_requires_csrf_header` |
+| Iteration 10 INI preservation and config source locking | `tests/test_iteration10.py::test_ini_write_preserves_comments_and_unknown_keys`, `test_config_source_is_reported_and_env_override_is_locked` |
 
 Reverse validation evidence for notification, header passthrough, cleanup and cancellation is recorded in `iteration/iteration-2/PROGRESS.md`; defects and untested follow-up scope are in `TEST_REVIEW_FOLLOWUP.md`.

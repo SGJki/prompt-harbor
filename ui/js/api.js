@@ -35,7 +35,7 @@ export async function putJSON(path, body, { signal, timeout = 10000 } = {}) {
   try {
     const res = await fetch(path, {
       method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'X-Prompt-Harbor-Request': '1' },
       body: JSON.stringify(body),
       signal: ctl.signal,
     });

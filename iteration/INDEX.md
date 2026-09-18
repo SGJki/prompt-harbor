@@ -12,6 +12,8 @@
 | iteration-6 | `closed` | 收紧透明代理 API key 安全边界：上游 URL 校验与告警、重定向凭证保护、UI/健康状态说明及回归测试。 | [PROGRESS](./iteration-6/PROGRESS.md) · [BLOCKED](./iteration-6/BLOCKED.md) |
 | iteration-7 | `closed` | 内置审计台 Configuration Tab：编辑 `prompt-harbor.ini`、原子持久化、安全字段脱敏和运行时热更新。 | [PROGRESS](./iteration-7/PROGRESS.md) · [BLOCKED](./iteration-7/BLOCKED.md) |
 | iteration-8 | `closed` | 安全审查修复：权限收紧失败终止、重定向响应隔离、认证字典及时清理、上游端口校验和规范化 origin 告警。 | [PROGRESS](./iteration-8/PROGRESS.md) · [BLOCKED](./iteration-8/BLOCKED.md) |
+| iteration-9 | `closed` | 审查最新两个 commit：OCR 选集、规则核对与 Codex 复核。 | [PROGRESS](./iteration-9/PROGRESS.md) · [BLOCKED](./iteration-9/BLOCKED.md) |
+| iteration-10 | `closed` | 前端增量重构：Host 白名单与安全响应头、写接口 CSRF 防御、INI 保注释写回、配置来源锁定、CSS token 与可访问性。 | [PROGRESS](./iteration-10/PROGRESS.md) · [BLOCKED](./iteration-10/BLOCKED.md) |
 
 ## Maintenance
 

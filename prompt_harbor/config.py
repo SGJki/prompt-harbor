@@ -7,6 +7,7 @@ import configparser
 import ipaddress
 import os
 import tempfile
+import re
 from urllib.parse import urlsplit
 from dataclasses import dataclass
 from typing import Callable, Optional, TypeVar
@@ -213,6 +214,37 @@ def load_settings(cli: argparse.Namespace) -> Settings:
     )
 
 
+def resolve_sources(cli: argparse.Namespace) -> dict[str, str]:
+    """Return the precedence source used for every editable setting."""
+    cli_config = getattr(cli, "config", None)
+    env_config = os.getenv("PROMPT_HARBOR_CONFIG")
+    config_path = cli_config or env_config or DEFAULT_CONFIG
+    parser = _read_config(config_path, explicit=bool(cli_config or env_config))
+    sources = {}
+    env_names = {
+        "database": "PROMPT_HARBOR_DB", "listen": "PROMPT_HARBOR_LISTEN", "upstream": "PROMPT_HARBOR_UPSTREAM",
+        "max_body": "PROMPT_HARBOR_MAX_BODY", "retention_days": "PROMPT_HARBOR_RETENTION_DAYS",
+        "db_timeout": "PROMPT_HARBOR_DB_TIMEOUT", "upstream_timeout": "PROMPT_HARBOR_UPSTREAM_TIMEOUT",
+        "sidecar_timeout": "PROMPT_HARBOR_SIDECAR_TIMEOUT", "sidecar_start_timeout": "PROMPT_HARBOR_PI_SIDECAR_START_TIMEOUT",
+        "sidecar_stop_timeout": "PROMPT_HARBOR_PI_SIDECAR_STOP_TIMEOUT", "api_call_limit": "PROMPT_HARBOR_API_CALL_LIMIT",
+        "cli_call_limit": "PROMPT_HARBOR_CLI_CALL_LIMIT", "sse_keepalive": "PROMPT_HARBOR_SSE_KEEPALIVE",
+        "purge_interval": "PROMPT_HARBOR_PURGE_INTERVAL", "ui_path": "PROMPT_HARBOR_UI",
+        "sidecar_url": "PROMPT_HARBOR_PI_SIDECAR_URL", "sidecar_command": "PROMPT_HARBOR_PI_SIDECAR_COMMAND",
+        "sidecar_token": "PROMPT_HARBOR_MESSAGES_TOKEN",
+    }
+    for field, spec in CONFIG_FIELDS.items():
+        cli_name = CLI_FIELD_NAMES.get(field, field)
+        if getattr(cli, cli_name, None) is not None:
+            sources[field] = "cli"
+        elif os.getenv(env_names[field]) not in (None, ""):
+            sources[field] = "env"
+        elif parser.has_option(spec["section"], spec["key"]) and parser.get(spec["section"], spec["key"]).strip():
+            sources[field] = "ini"
+        else:
+            sources[field] = "default"
+    return sources
+
+
 def settings_values(settings: Settings) -> dict[str, object]:
     """Return the complete editable value set for runtime/config updates."""
     return {field: getattr(settings, field) for field in CONFIG_FIELDS}
@@ -232,20 +264,20 @@ def validate_values(values: dict[str, object]) -> Settings:
 def write_config(path: str, values: dict[str, object]) -> Settings:
     """Validate and atomically persist editable settings to an INI file."""
     settings = validate_values(values)
-    parser = _read_config(path, explicit=False)
-    for field, spec in CONFIG_FIELDS.items():
-        parser.setdefault(spec["section"], {})
-        value = getattr(settings, field)
-        if value is None:
-            parser.remove_option(spec["section"], spec["key"])
-        else:
-            parser.set(spec["section"], spec["key"], str(value))
+    try:
+        with open(path, encoding="utf-8", newline="") as stream:
+            original = stream.read()
+    except FileNotFoundError:
+        original = ""
+    except OSError as exc:
+        raise ConfigError(f"cannot read configuration file {path}: {exc}") from exc
+    text = _update_ini_text(original, settings)
     directory = os.path.dirname(os.path.abspath(path)) or "."
     temporary = None
     try:
         fd, temporary = tempfile.mkstemp(prefix=".prompt-harbor-", suffix=".ini", dir=directory, text=True)
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
-            parser.write(stream)
+            stream.write(text)
         try:
             os.chmod(temporary, 0o600)
         except OSError:
@@ -259,6 +291,62 @@ def write_config(path: str, values: dict[str, object]) -> Settings:
                 pass
         raise ConfigError(f"cannot write configuration file {path}: {exc}") from exc
     return settings
+
+
+_SECTION_RE = re.compile(r"^\s*\[([^]]+)\]\s*(?:\r?\n|$)")
+_KEY_RE = re.compile(r"^(\s*)([^=:#\s]+)(\s*[=:]\s*)(.*?)(\r?\n|$)$")
+
+
+def _update_ini_text(original: str, settings: Settings) -> str:
+    """Edit managed keys in-place while retaining comments and unknown lines."""
+    lines = original.splitlines(keepends=True)
+    if not lines:
+        lines = []
+    locations = {}
+    current = None
+    for index, line in enumerate(lines):
+        section = _SECTION_RE.match(line)
+        if section:
+            current = section.group(1).strip().lower()
+            continue
+        key = _KEY_RE.match(line)
+        if key and current:
+            locations[(current, key.group(2).strip().lower())] = index
+    additions: dict[str, list[str]] = {}
+    for field, spec in CONFIG_FIELDS.items():
+        section = spec["section"].lower()
+        key = spec["key"]
+        value = getattr(settings, field)
+        location = locations.get((section, key.lower()))
+        if location is not None:
+            if value is None:
+                lines[location] = ""
+            else:
+                match = _KEY_RE.match(lines[location])
+                newline = match.group(5) if match else "\n"
+                lines[location] = f"{match.group(1) if match else ''}{key}{match.group(3) if match else ' = '}{value}{newline}"
+        elif value is not None:
+            additions.setdefault(section, []).append(f"{key} = {value}\n")
+    for section, entries in additions.items():
+        section_index = next((i for i, line in enumerate(lines) if (_SECTION_RE.match(line) and _SECTION_RE.match(line).group(1).strip().lower() == section)), None)
+        if section_index is None:
+            if lines and not lines[-1].endswith(("\n", "\r")):
+                lines[-1] += "\n"
+            if lines and lines[-1].strip():
+                lines.append("\n")
+            lines.append(f"[{section}]\n")
+            lines.extend(entries)
+            continue
+        end = len(lines)
+        for i in range(section_index + 1, len(lines)):
+            if _SECTION_RE.match(lines[i]):
+                end = i
+                break
+        insert_at = end
+        while insert_at > section_index + 1 and not lines[insert_at - 1].strip():
+            insert_at -= 1
+        lines[insert_at:insert_at] = entries
+    return "".join(lines)
 
 
 def validate_listen(value: str) -> tuple[str, int]:

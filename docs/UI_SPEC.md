@@ -12,6 +12,9 @@
 - 前端收到 `invalidate` 后按当前视图重新请求数据；轮询仅作为断线兜底。
 - Calls 支持状态和 session 筛选，点击行查看请求、响应、headers、usage 和错误。
 - 授权头不得出现在 API 返回或页面内容中。
+- UI、静态资源和 API 响应带有 CSP、`X-Content-Type-Options: nosniff` 与 `Referrer-Policy: no-referrer`；API 使用 `Cache-Control: no-store`。请求仅接受 `127.0.0.1`、`localhost` 和 `[::1]` Host（可带端口），其他 Host 返回 403。
+- `PUT /api/config` 必须携带 `X-Prompt-Harbor-Request: 1`。配置字段返回 `source`（`cli`、`env`、`ini` 或 `default`）；CLI/env 覆盖字段在 UI 中锁定，提交不同值会返回 400。
+- 配置写回按行更新受管 key，保留注释和未知 key，并通过临时文件原子替换，文件权限保持 0600。
 
 ## 验收
 1. `uv run pytest -q` 通过（环境禁止 loopback 时记录限制）。

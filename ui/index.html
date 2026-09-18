@@ -9,11 +9,11 @@
 <body>
 <aside class="side">
   <div class="brand">prompt harbor<small>gateway audit desk</small></div>
-  <nav class="nav">
-    <button class="active" data-tab="overview">Overview</button>
-    <button data-tab="calls">Calls</button>
-    <button data-tab="sessions">Sessions</button>
-    <button data-tab="config">Configuration</button>
+  <nav class="nav" role="tablist" aria-label="Audit views">
+    <button role="tab" aria-selected="true" class="active" data-tab="overview">Overview</button>
+    <button role="tab" aria-selected="false" data-tab="calls">Calls</button>
+    <button role="tab" aria-selected="false" data-tab="sessions">Sessions</button>
+    <button role="tab" aria-selected="false" data-tab="config">Configuration</button>
   </nav>
 </aside>
 <main class="main">

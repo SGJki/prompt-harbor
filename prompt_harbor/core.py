@@ -30,6 +30,7 @@ from .config import (
     ConfigError,
     CONFIG_FIELDS,
     load_settings,
+    resolve_sources,
     settings_values,
     validate_listen,
     validate_upstream,
@@ -184,6 +185,7 @@ class Handler(BaseHTTPRequestHandler):
     security_warnings = ()
     config_path = "prompt-harbor.ini"
     config_settings = {}
+    config_sources = {}
     gateway_server = None
 
     @staticmethod
@@ -191,7 +193,38 @@ class Handler(BaseHTTPRequestHandler):
         raw = json.dumps({"error": {"type": "invalid_request", "message": message}}, ensure_ascii=False).encode()
         return raw
 
+    def _send_payload(self, status, raw, content_type="application/json; charset=utf-8", *, api=False, cache_control=None):
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(raw)))
+        self.send_header("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        if api:
+            self.send_header("Cache-Control", cache_control or "no-store")
+        elif cache_control:
+            self.send_header("Cache-Control", cache_control)
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def _reject_untrusted_host(self):
+        """Reject browser requests whose Host does not identify this loopback service."""
+        host = self.headers.get("Host")
+        if not host:
+            return False
+        try:
+            from urllib.parse import urlsplit
+            hostname = urlsplit("//" + host).hostname
+        except ValueError:
+            hostname = None
+        if hostname and hostname.lower().rstrip(".") in {"127.0.0.1", "localhost", "::1"}:
+            return False
+        self._send_payload(403, self._json_error(403, "untrusted Host header"), api=self.path.startswith("/api/"))
+        return True
+
     def do_POST(self):
+        if self._reject_untrusted_host():
+            return
         if self.path == "/messages":
             self._handle_pi_messages()
         else:
@@ -298,11 +331,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _send_json_error(self, status, message):
         raw = self._json_error(status, message)
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(raw)))
-        self.end_headers()
-        self.wfile.write(raw)
+        self._send_payload(status, raw, api=self.path.startswith("/api/"))
         self.wfile.flush()
 
     def _capture_chunk(self, record, chunk):
@@ -559,6 +588,8 @@ class Handler(BaseHTTPRequestHandler):
             return original
 
     def do_GET(self):
+        if self._reject_untrusted_host():
+            return
         if self.path == "/models":
             self._proxy_sidecar_get("/models")
             return
@@ -575,7 +606,7 @@ class Handler(BaseHTTPRequestHandler):
             except OSError:
                 self.send_error(404)
                 return
-            self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8"); self.send_header("Content-Length", str(len(raw))); self.end_headers(); self.wfile.write(raw); return
+            self._send_payload(200, raw, "text/html; charset=utf-8"); return
         if self.path.startswith("/api/calls/"):
             try:
                 call_id = int(self.path.rsplit("/", 1)[1])
@@ -590,9 +621,9 @@ class Handler(BaseHTTPRequestHandler):
             value["request_headers_json"] = json.loads(value["request_headers_json"] or "{}"); value["response_headers_json"] = json.loads(value["response_headers_json"] or "{}")
             for key in ("request_body", "response_body"):
                 if isinstance(value.get(key), bytes): value[key] = value[key].decode("utf-8", errors="replace")
-            raw = json.dumps(value, ensure_ascii=False).encode(); self.send_response(200); self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(raw))); self.end_headers(); self.wfile.write(raw); return
+            raw = json.dumps(value, ensure_ascii=False).encode(); self._send_payload(200, raw, api=True); return
         if self.path == "/api/events":
-            self.send_response(200); self.send_header("Content-Type", "text/event-stream"); self.send_header("Cache-Control", "no-cache"); self.send_header("Connection", "keep-alive"); self.end_headers(); self.wfile.write(b"event: ready\ndata: {}\n\n"); self.wfile.flush(); self.clients.append(self)
+            self.send_response(200); self.send_header("Content-Type", "text/event-stream"); self.send_header("Cache-Control", "no-store"); self.send_header("Connection", "keep-alive"); self.send_header("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'"); self.send_header("X-Content-Type-Options", "nosniff"); self.send_header("Referrer-Policy", "no-referrer"); self.end_headers(); self.wfile.write(b"event: ready\ndata: {}\n\n"); self.wfile.flush(); self.clients.append(self)
             self._sse_connection = db(self.db_path, self.db_timeout)
             self._sse_change_id = self._sse_connection.execute("SELECT COALESCE(MAX(id), 0) FROM change_log").fetchone()[0]
             self._sse_last_notified = set()
@@ -628,11 +659,16 @@ class Handler(BaseHTTPRequestHandler):
             payload["security_warnings"] = list(self.security_warnings)
         if self.path == "/api/calls": payload = {"calls": calls}
         if self.path == "/api/sessions": payload = {"sessions": sessions}
-        raw = json.dumps(payload, ensure_ascii=False).encode(); self.send_response(200); self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(raw))); self.end_headers(); self.wfile.write(raw)
+        raw = json.dumps(payload, ensure_ascii=False).encode(); self._send_payload(200, raw, api=True)
 
     def do_PUT(self):
+        if self._reject_untrusted_host():
+            return
         if self.path != "/api/config":
             self.send_error(404)
+            return
+        if self.headers.get("X-Prompt-Harbor-Request") != "1":
+            self._send_payload(403, self._json_error(403, "missing X-Prompt-Harbor-Request header"), api=True)
             return
         try:
             length = int(self.headers.get("Content-Length", "0") or 0)
@@ -644,10 +680,10 @@ class Handler(BaseHTTPRequestHandler):
             result = update_runtime_config(payload)
         except (ConfigError, ValueError, TypeError, json.JSONDecodeError) as exc:
             raw = self._json_error(400, str(exc))
-            self.send_response(400); self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(raw))); self.end_headers(); self.wfile.write(raw)
+            self._send_payload(400, raw, api=True)
             return
         raw = json.dumps(result, ensure_ascii=False).encode()
-        self.send_response(200); self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(raw))); self.end_headers(); self.wfile.write(raw)
+        self._send_payload(200, raw, api=True)
 
     def _send_config(self):
         values = dict(self.config_settings)
@@ -661,9 +697,10 @@ class Handler(BaseHTTPRequestHandler):
                 "section": spec["section"],
                 "key": spec["key"],
                 "secret": bool(spec.get("secret")),
+                "source": self.config_sources.get(name, "default"),
             }
         raw = json.dumps({"path": self.config_path, "fields": fields}, ensure_ascii=False).encode()
-        self.send_response(200); self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(raw))); self.end_headers(); self.wfile.write(raw)
+        self._send_payload(200, raw, api=True)
 
     def _proxy_sidecar_get(self, path):
         if not self.sidecar_url:
@@ -692,10 +729,16 @@ class Handler(BaseHTTPRequestHandler):
         if not path.startswith(root + os.sep): self.send_error(404); return
         try: raw = open(path, "rb").read()
         except OSError: self.send_error(404); return
-        self.send_response(200); self.send_header("Content-Type", CONTENT_TYPES[extension]); self.send_header("Content-Length", str(len(raw))); self.send_header("Cache-Control", "no-cache"); self.end_headers(); self.wfile.write(raw)
+        self._send_payload(200, raw, CONTENT_TYPES[extension], cache_control="no-cache")
 
     def log_message(self, *args):
         pass
+
+    def send_error(self, code, message=None, explain=None):
+        """Keep error responses under the same browser security policy."""
+        short = message or self.responses.get(code, ("",))[0]
+        body = f"<html><head><title>Error {code}</title></head><body><h1>Error {code}</h1><p>{short}</p></body></html>".encode()
+        self._send_payload(code, body, "text/html; charset=utf-8", api=self.path.startswith("/api/"), cache_control="no-store" if self.path.startswith("/api/") else None)
 
 
 def _config_updates(payload):
@@ -745,6 +788,10 @@ def _update_runtime_config(payload):
     if not values:
         raise ConfigError("gateway configuration is not initialized")
     for field, value in updates.items():
+        source = Handler.config_sources.get(field, "default")
+        current = values.get(field)
+        if source in {"cli", "env"} and str(value) != str(current):
+            raise ConfigError(f"{field} is locked by {source} override")
         if field == "sidecar_token" and value == "":
             value = None
         if value is not None and not isinstance(value, (str, int, float, bool)):
@@ -752,6 +799,10 @@ def _update_runtime_config(payload):
         values[field] = value
     settings = write_config(Handler.config_path, values)
     Handler.config_settings = settings_values(settings)
+    Handler.config_sources = {
+        field: (source if source in {"cli", "env"} else "ini")
+        for field, source in Handler.config_sources.items()
+    }
     _apply_runtime_settings(settings)
     if "sidecar_url" in updates:
         Handler.sidecar_url = settings.sidecar_url
@@ -764,6 +815,7 @@ def _update_runtime_config(payload):
                 "restart_required": CONFIG_FIELDS[field]["restart_required"],
                 "section": CONFIG_FIELDS[field]["section"], "key": CONFIG_FIELDS[field]["key"],
                 "secret": bool(CONFIG_FIELDS[field].get("secret"))}
+                | {"source": Handler.config_sources.get(field, "default")}
         for field in CONFIG_FIELDS
     }
     return {"path": Handler.config_path, "fields": public, "restart_required": restart_required}
@@ -908,6 +960,7 @@ def main(argv=None):
     Handler.db_timeout = settings.db_timeout; Handler.capture_max_body = settings.max_body; Handler.upstream_timeout = settings.upstream_timeout; Handler.sidecar_timeout = settings.sidecar_timeout; Handler.sse_keepalive = settings.sse_keepalive; Handler.api_call_limit = settings.api_call_limit; Handler.ui_path = settings.ui_path
     Handler.config_path = settings.config_path
     Handler.config_settings = settings_values(settings)
+    Handler.config_sources = resolve_sources(args)
     host, port = validate_listen(settings.listen); print(f"gateway listening on http://{settings.listen}, upstream {settings.upstream}", flush=True)
     for warning in settings.upstream_warnings:
         print("WARNING: " + warning, file=sys.stderr, flush=True)
