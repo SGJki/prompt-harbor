@@ -130,7 +130,7 @@ export async function loadDetail(id) {
 
 export function setFilters(patch) {
   set({ filters: { ...state.filters, ...patch } });
-  emit('filters');
+  emit(Object.prototype.hasOwnProperty.call(patch, 'sessionScope') ? 'view' : 'filters');
 }
 
 export function jumpToSession(sessionId, scope = 'runtime') {

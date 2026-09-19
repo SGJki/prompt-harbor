@@ -128,7 +128,9 @@ view.addEventListener('submit', e => {
 
 view.addEventListener('change', e => {
   const el = e.target.closest('[data-filter]');
-  if (el) setFilters({ [el.dataset.filter]: el.value });
+  if (!el) return;
+  if (el.dataset.filter === 'sessionScope') setFilters({ sessionScope: el.value, session: 'all' });
+  else setFilters({ [el.dataset.filter]: el.value });
 });
 
 let searchTimer = 0;

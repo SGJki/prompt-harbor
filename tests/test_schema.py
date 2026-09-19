@@ -47,6 +47,23 @@ def test_legacy_database_is_discarded_before_new_indexes(tmp_path):
         assert connection.execute("select count(*) from sessions").fetchone() == (0,)
         assert connection.execute("pragma table_info(calls)").fetchall()[1][1] == "session_id"
         assert connection.execute("select name from sqlite_master where type='index' and name='calls_runtime_session_idx'").fetchone()
+
+
+def test_partial_calls_schema_missing_provider_context_is_discarded(tmp_path):
+    path = tmp_path / "partial.db"
+    with sqlite3.connect(path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE runtime_sessions(id INTEGER PRIMARY KEY AUTOINCREMENT, agent TEXT, started_at TEXT, last_seen_at TEXT, cwd TEXT, project_name TEXT, metadata_json TEXT);
+            CREATE TABLE client_sessions(id INTEGER PRIMARY KEY AUTOINCREMENT, client_session_id TEXT, identity_status TEXT, identity_source TEXT, first_seen_at TEXT, last_seen_at TEXT, metadata_json TEXT);
+            CREATE TABLE calls(id INTEGER PRIMARY KEY AUTOINCREMENT, session_id INTEGER, runtime_session_id INTEGER, client_session_row_id INTEGER, thread_id TEXT, request_correlation_id TEXT, created_at TEXT, completed_at TEXT, provider TEXT, api_family TEXT, endpoint TEXT, model TEXT, stream INTEGER, status TEXT, status_code INTEGER, first_byte_at TEXT, duration_ms INTEGER, input_bytes INTEGER, output_bytes INTEGER, error_type TEXT, error_message TEXT);
+            CREATE TABLE payloads(id INTEGER PRIMARY KEY AUTOINCREMENT, attempt_id INTEGER UNIQUE, capture_degraded INTEGER);
+            """
+        )
+    g.init(str(path))
+    with sqlite3.connect(path) as connection:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(calls)")}
+        assert "provider_session_context" in columns
 class ExtractionUpstream(BaseHTTPRequestHandler):
     def do_POST(self):
         n=int(self.headers.get('Content-Length','0')); self.rfile.read(n)

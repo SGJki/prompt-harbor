@@ -139,7 +139,7 @@ def init(path, timeout=DEFAULT_DB_TIMEOUT):
             call_columns = {row[1] for row in probe.execute("PRAGMA table_info(calls)")} if "calls" in tables else set()
             payload_columns = {row[1] for row in probe.execute("PRAGMA table_info(payloads)")} if "payloads" in tables else set()
             legacy = "runtime_sessions" not in tables or "client_sessions" not in tables or {
-                "runtime_session_id", "client_session_row_id", "thread_id", "request_correlation_id",
+                "runtime_session_id", "client_session_row_id", "thread_id", "request_correlation_id", "provider_session_context",
             } - call_columns or "capture_degraded" not in payload_columns
         if legacy:
             # The project is pre-deployment: discard the pre-feature schema
@@ -1065,7 +1065,11 @@ def _update_runtime_config(payload):
 def purge(path, retention_days=DEFAULT_RETENTION_DAYS, timeout=DEFAULT_DB_TIMEOUT):
     from .database import purge_calls
     with closing(db(path, timeout)) as connection:
-        count = purge_calls(connection, retention_days)
+        active_runtime_session_id = None
+        active_server = getattr(Handler, "gateway_server", None)
+        if active_server is not None and os.fspath(getattr(Handler, "db_path", "")) == os.fspath(path):
+            active_runtime_session_id = getattr(Handler, "runtime_session_id", None)
+        count = purge_calls(connection, retention_days, protected_runtime_session_id=active_runtime_session_id)
         cursors = [
             getattr(client, "_sse_change_id")
             for client in list(getattr(Handler, "clients", []))

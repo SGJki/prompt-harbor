@@ -28,6 +28,15 @@ def test_purge_removes_unreferenced_explicit_sessions(tmp_path):
         assert c.execute("select count(*) from runtime_sessions").fetchone() == (0,)
         assert c.execute("select count(*) from client_sessions").fetchone() == (0,)
 
+
+def test_purge_preserves_protected_runtime_session(tmp_path):
+    p = tmp_path / 'protected.db'; g.init(str(p))
+    with sqlite3.connect(p) as c:
+        runtime_id = c.execute("insert into runtime_sessions(agent,started_at,last_seen_at) values('active','now','now')").lastrowid
+        from prompt_harbor.database import purge_calls
+        purge_calls(c, protected_runtime_session_id=runtime_id)
+        assert c.execute("select count(*) from runtime_sessions where id=?", (runtime_id,)).fetchone() == (1,)
+
 def seed_chain(path, age_days, attempts=1, model='m'):
     stamp=(datetime.now(timezone.utc)-timedelta(days=age_days)).isoformat()
     with sqlite3.connect(path) as c:

@@ -4,7 +4,7 @@ def connect(path, timeout=DEFAULT_DB_TIMEOUT):
     from .core import db
     return db(path, timeout)
 
-def purge_calls(c, retention_days=DEFAULT_RETENTION_DAYS):
+def purge_calls(c, retention_days=DEFAULT_RETENTION_DAYS, protected_runtime_session_id=None):
     """Canonical SQL cascade used by compatibility callers with an open DB."""
     if retention_days <= 0:
         raise ValueError("retention_days must be positive")
@@ -17,5 +17,10 @@ def purge_calls(c, retention_days=DEFAULT_RETENTION_DAYS):
         c.execute('DELETE FROM attempts WHERE call_id=?', (call_id,))
         c.execute('DELETE FROM calls WHERE id=?', (call_id,))
     c.execute("DELETE FROM client_sessions WHERE id NOT IN (SELECT DISTINCT client_session_row_id FROM calls WHERE client_session_row_id IS NOT NULL)")
-    c.execute("DELETE FROM runtime_sessions WHERE id NOT IN (SELECT DISTINCT runtime_session_id FROM calls WHERE runtime_session_id IS NOT NULL)")
+    c.execute(
+        "DELETE FROM runtime_sessions "
+        "WHERE id NOT IN (SELECT DISTINCT runtime_session_id FROM calls WHERE runtime_session_id IS NOT NULL) "
+        "AND (? IS NULL OR id != ?)",
+        (protected_runtime_session_id, protected_runtime_session_id),
+    )
     return len(ids)

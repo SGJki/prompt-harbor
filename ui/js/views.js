@@ -11,6 +11,10 @@ function sessionLabel(s) {
   return `#${s.id} ${s.agent || ''}${s.project_name ? ' · ' + s.project_name : ''}`.trim();
 }
 
+function clientSessionLabel(s) {
+  return `${s.client_session_id}${s.identity_status ? ` · ${s.identity_status}` : ''}`;
+}
+
 export function filterCalls(state) {
   const { status, session, sessionScope = 'runtime', q } = state.filters;
   const needle = q.trim().toLowerCase();
@@ -55,8 +59,14 @@ export function overviewView(state) {
 
 export function callsView(state) {
   const f = state.filters;
-  const sessionOpts = [`<option value="all" ${f.session === 'all' ? 'selected' : ''}>All runtime sessions</option>`]
-    .concat(state.runtimeSessions.map(s => `<option value="${esc(s.id)}" ${String(s.id) === f.session ? 'selected' : ''}>${esc(sessionLabel(s))}</option>`))
+  const scope = f.sessionScope === 'client' ? 'client' : 'runtime';
+  const sessions = scope === 'client' ? state.clientSessions : state.runtimeSessions;
+  const sessionOpts = [`<option value="all" ${f.session === 'all' ? 'selected' : ''}>All ${scope} sessions</option>`]
+    .concat(sessions.map(s => {
+      const value = scope === 'client' ? s.client_session_id : s.id;
+      const label = scope === 'client' ? clientSessionLabel(s) : sessionLabel(s);
+      return `<option value="${esc(value)}" ${String(value) === f.session ? 'selected' : ''}>${esc(label)}</option>`;
+    }))
     .join('');
   const statusOpts = ['all', 'succeeded', 'failed', 'running']
     .map(s => `<option value="${s}" ${f.status === s ? 'selected' : ''}>${s[0].toUpperCase() + s.slice(1)}</option>`)
@@ -65,6 +75,7 @@ export function callsView(state) {
   return `<div class="panel">
 <div class="filters">
 <select data-filter="status">${statusOpts}</select>
+<select data-filter="sessionScope"><option value="runtime" ${scope === 'runtime' ? 'selected' : ''}>Runtime sessions</option><option value="client" ${scope === 'client' ? 'selected' : ''}>Client sessions</option></select>
 <select data-filter="session">${sessionOpts}</select>
 <input data-filter="q" type="search" placeholder="Filter by model or endpoint…" value="${esc(f.q)}">
 </div>

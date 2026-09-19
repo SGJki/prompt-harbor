@@ -21,6 +21,8 @@
 | iteration-15 | `closed` | 完成会话分层、并发审计持久化、显式 API/UI/CLI、bounded response snapshot、payload 安全与 sidecar ownership/reprobe；176 项 pytest 和浏览器回归通过。 | [PROGRESS](./iteration-15/PROGRESS.md) · [BLOCKED](./iteration-15/BLOCKED.md) |
 | iteration-16 | `closed` | 修复旧 schema 重建、sidecar crash 终态覆盖和 identity/capture budget 热更新；179 项 pytest 与浏览器回归通过。 | [PROGRESS](./iteration-16/PROGRESS.md) · [BLOCKED](./iteration-16/BLOCKED.md) |
 | iteration-17 | `closed` | neat-freak 知识收尾：同步现役文档、核对规则与运行证据、审计工作区残留；179 项 pytest 与 1 项浏览器回归通过。 | [PROGRESS](./iteration-17/PROGRESS.md) · [BLOCKED](./iteration-17/BLOCKED.md) |
+| iteration-18 | `closed` | 审查 `d1bf93c9`：OCR 选出 26 个文件，确认 schema 漏检、runtime purge 生命周期和 client-session UI 筛选 3 项问题；179 项 pytest 通过。 | [PROGRESS](./iteration-18/PROGRESS.md) · [BLOCKED](./iteration-18/BLOCKED.md) |
+| iteration-19 | `closed` | 修复 `d1bf93c9` CR 的 schema 漏检、runtime purge 生命周期和 client-session UI 筛选问题；181 项 pytest 与 1 项浏览器回归通过，并保留公开发布安全审计记录。 | [PROGRESS](./iteration-19/PROGRESS.md) · [BLOCKED](./iteration-19/BLOCKED.md) |
 
 ## Maintenance
 
