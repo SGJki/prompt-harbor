@@ -16,4 +16,6 @@ def purge_calls(c, retention_days=DEFAULT_RETENTION_DAYS):
             c.execute('DELETE FROM payloads WHERE attempt_id=?', (attempt_id,))
         c.execute('DELETE FROM attempts WHERE call_id=?', (call_id,))
         c.execute('DELETE FROM calls WHERE id=?', (call_id,))
+    c.execute("DELETE FROM client_sessions WHERE id NOT IN (SELECT DISTINCT client_session_row_id FROM calls WHERE client_session_row_id IS NOT NULL)")
+    c.execute("DELETE FROM runtime_sessions WHERE id NOT IN (SELECT DISTINCT runtime_session_id FROM calls WHERE runtime_session_id IS NOT NULL)")
     return len(ids)

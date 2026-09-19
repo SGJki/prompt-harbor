@@ -71,12 +71,13 @@ https://api.openai.com/v1/responses
 
 ## 5. 数据模型
 
-SQLite 使用五张表，关联由应用层维护，不创建外键约束：
+SQLite 使用运行时/客户端会话和调用链表，关联由应用层维护，不创建外键约束：
 
-- `sessions`：网关启动创建的会话及工作目录元数据；同一进程内的调用共享该 `session_id`。
+- `runtime_sessions`：一次网关进程运行及工作目录元数据；每个 call 关联当前 runtime session。
+- `client_sessions`：由 inbound `session-id` 或支持的 metadata session 得到的逻辑客户端会话，可跨连接和网关重启；无可靠身份时记录独立 `unresolved/ephemeral` 行。
 - `calls`：客户端请求的状态、provider/API family、endpoint、model、流式标记、状态码、耗时和错误。
 - `attempts`：每个调用的上游尝试、脱敏 headers、上游 URL、状态和字节统计。
-- `payloads`：请求/响应 body、content type、完整性和截断标记。
+- `payloads`：请求/最终响应 snapshot、content type，以及 `response_complete`、`response_truncated`、`capture_degraded` 等独立事实。
 - `usage`：输入/输出/总 token 及原始 usage JSON。
 
 body 直接存 SQLite。请求和响应默认各保存最多 10 MiB，超出部分只保留前缀并设置截断标记。
@@ -114,14 +115,14 @@ uv run python -m prompt_harbor purge
 
 ## 9. UI
 
-已提供独立无依赖页面 `ui/index.html`，由网关托管。页面通过 `GET /api/overview`、`/api/calls`、`/api/sessions` 和 `GET /api/calls/{id}` 查询数据，并通过 `GET /api/events` 接收 `invalidate` 事件；完整契约和验收项见 `docs/UI_SPEC.md`。
+已提供独立无依赖页面 `ui/index.html`，由网关托管。页面通过 `GET /api/overview`、`/api/calls`、`/api/runtime-sessions`、`/api/client-sessions` 和 `GET /api/calls/{id}` 查询数据，并通过 `GET /api/events` 接收 `invalidate` 事件；旧的 `/api/sessions` 路径返回 404，完整契约和验收项见 `docs/UI_SPEC.md`。
 
 
 ## 10. 主键与关联约定
 
 所有表使用 SQLite 自增整数主键：`id INTEGER PRIMARY KEY AUTOINCREMENT`。
 
-表之间不创建 SQLite 外键约束。`session_id`、`call_id`、`attempt_id` 只由业务代码维护；写入、查询和级联删除均由应用层负责。
+表之间不创建 SQLite 外键约束。`runtime_session_id`、`client_session_row_id`、`call_id`、`attempt_id` 只由业务代码维护；写入、查询和级联删除均由应用层负责。旧的 `/api/sessions` 资源不再提供。
 
 ## 11. Session 期间的完整链路
 
@@ -151,20 +152,22 @@ sequenceDiagram
 
 ```mermaid
 erDiagram
-    SESSIONS ||--o{ CALLS : "session_id"
+    RUNTIME_SESSIONS ||--o{ CALLS : "runtime_session_id"
+    CLIENT_SESSIONS ||--o{ CALLS : "client_session_row_id"
     CALLS ||--|{ ATTEMPTS : "call_id"
     ATTEMPTS ||--|| PAYLOADS : "attempt_id"
     ATTEMPTS ||--o| USAGE : "attempt_id"
     ATTEMPTS ||--o{ STREAM_CHUNKS : "attempt_id"
-    SESSIONS { integer id PK }
-    CALLS { integer id PK integer session_id }
+    RUNTIME_SESSIONS { integer id PK }
+    CLIENT_SESSIONS { integer id PK text client_session_id }
+    CALLS { integer id PK integer runtime_session_id integer client_session_row_id text thread_id text request_correlation_id }
     ATTEMPTS { integer id PK integer call_id }
     PAYLOADS { integer id PK integer attempt_id }
     USAGE { integer id PK integer attempt_id }
     STREAM_CHUNKS { integer id PK integer attempt_id }
 ```
 
-当前启用 `sessions`、`calls`、`attempts`、`payloads` 和 `usage`；`stream_chunks` 作为后续扩展，默认不逐 chunk 持久化。
+当前启用 `runtime_sessions`、`client_sessions`、`calls`、`attempts`、`payloads` 和 `usage`；`stream_chunks` 作为后续扩展，默认不逐 chunk 持久化。`session-id` 是 client session 的主要身份来源；`thread-id`、request correlation ID 和 provider session context 保持独立。
 
 ## 13. 当前实现约定
 

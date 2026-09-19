@@ -5,7 +5,8 @@ const emptyDetail = () => ({ callId: null, loading: false, error: null, data: nu
 export const state = {
   tab: 'overview',
   calls: [],
-  sessions: [],
+  runtimeSessions: [],
+  clientSessions: [],
   loading: false,
   error: null,
   lastUpdated: null,
@@ -56,7 +57,8 @@ export async function load() {
   const seq = ++loadSeq;
   const tab = state.tab;
   let endpoint = '/api/overview';
-  if (tab === 'sessions') endpoint = '/api/sessions';
+  if (tab === 'runtime-sessions') endpoint = '/api/runtime-sessions';
+  else if (tab === 'client-sessions') endpoint = '/api/client-sessions';
   else if (tab === 'config') endpoint = '/api/config';
   set({ loading: true, error: null });
   emit('status');
@@ -64,8 +66,9 @@ export async function load() {
     const data = await getJSON(endpoint, { signal: ctl.signal });
     if (seq !== loadSeq) return;
     if (tab === 'config') set({ config: data, configError: null });
-    else if (tab === 'sessions') set({ sessions: data.sessions || [] });
-    else set({ calls: data.calls || [], sessions: data.sessions || [], securityWarnings: data.security_warnings || [] });
+    else if (tab === 'runtime-sessions') set({ runtimeSessions: data.runtime_sessions || [] });
+    else if (tab === 'client-sessions') set({ clientSessions: data.client_sessions || [] });
+    else set({ calls: data.calls || [], runtimeSessions: data.runtime_sessions || [], clientSessions: data.client_sessions || [], securityWarnings: data.security_warnings || [] });
     set({ lastUpdated: new Date() });
     emit('data');
   } catch (err) {
@@ -130,17 +133,17 @@ export function setFilters(patch) {
   emit('filters');
 }
 
-export function jumpToSession(sessionId) {
+export function jumpToSession(sessionId, scope = 'runtime') {
   const target = String(sessionId);
   if (state.tab === 'calls') {
-    setFilters({ session: target });
+    setFilters({ session: target, sessionScope: scope });
     return;
   }
   loadCtl?.abort();
   detailCtl?.abort();
   set({
     tab: 'calls',
-    filters: { ...state.filters, session: target },
+    filters: { ...state.filters, session: target, sessionScope: scope },
     selectedCallId: null,
     detail: emptyDetail(),
     error: null,

@@ -1,6 +1,6 @@
 import { state, subscribe, setTab, load, selectCall, loadDetail, setFilters, jumpToSession, saveConfig } from './store.js';
 import { startRealtime } from './realtime.js';
-import { overviewView, callsView, sessionsView, detailView, filterCalls, callTable } from './views.js';
+import { overviewView, callsView, runtimeSessionsView, clientSessionsView, detailView, filterCalls, callTable } from './views.js';
 import { configView } from './config.js';
 import { esc, fmtDateTime } from './format.js';
 
@@ -11,7 +11,7 @@ const conn = document.querySelector('#conn');
 const banner = document.querySelector('#banner');
 const refreshBtn = document.querySelector('#refresh');
 
-const TITLES = { overview: 'Overview', calls: 'Calls', sessions: 'Sessions', config: 'Configuration' };
+const TITLES = { overview: 'Overview', calls: 'Calls', 'runtime-sessions': 'Runtime Sessions', 'client-sessions': 'Client Sessions', config: 'Configuration' };
 const CONN_LABEL = { live: 'live', poll: 'polling', off: 'offline' };
 
 function renderView() {
@@ -22,7 +22,8 @@ function renderView() {
     button.setAttribute('aria-selected', selected ? 'true' : 'false');
   });
   if (state.tab === 'calls') view.innerHTML = callsView(state);
-  else if (state.tab === 'sessions') view.innerHTML = sessionsView(state);
+  else if (state.tab === 'runtime-sessions') view.innerHTML = runtimeSessionsView(state);
+  else if (state.tab === 'client-sessions') view.innerHTML = clientSessionsView(state);
   else if (state.tab === 'config') view.innerHTML = configView(state);
   else view.innerHTML = overviewView(state);
   bindRowActions();
@@ -105,7 +106,7 @@ banner.addEventListener('click', e => {
 view.addEventListener('click', e => {
   const sessionBtn = e.target.closest('[data-session-calls]');
   if (sessionBtn) {
-    jumpToSession(sessionBtn.dataset.sessionCalls);
+    jumpToSession(sessionBtn.dataset.sessionCalls, sessionBtn.dataset.sessionScope || 'runtime');
     return;
   }
   const retry = e.target.closest('[data-retry]');

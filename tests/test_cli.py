@@ -16,6 +16,19 @@ def test_list_has_metadata_columns(tmp_path):
  r=subprocess.run([sys.executable,'prompt_harbor.py','list','--database',str(p)],capture_output=True,text=True); assert r.returncode==0
  assert '2026-09-17T12:34:56+00:00 cli-model succeeded 201 42ms 12/34 /v1/responses' in r.stdout
  assert 'SECRET_BODY' not in r.stdout and 'response\n' not in r.stdout
+
+
+def test_cli_explicit_scope_and_capture_fields_are_safe(tmp_path):
+ p=tmp_path/'p.db'; subprocess.run([sys.executable,'prompt_harbor.py','init','--database',str(p)],check=True,capture_output=True)
+ with sqlite3.connect(p) as c:
+  c.execute("insert into runtime_sessions(agent,started_at,last_seen_at) values('cli','now','now')"); runtime_id=c.execute('select last_insert_rowid()').fetchone()[0]
+  c.execute("insert into client_sessions(client_session_id,identity_status,identity_source,first_seen_at,last_seen_at) values('opaque','explicit','session-id','now','now')"); client_row=c.execute('select last_insert_rowid()').fetchone()[0]
+  c.execute("insert into calls(runtime_session_id,client_session_row_id,thread_id,request_correlation_id,created_at,endpoint,model,status,status_code) values(?,?,?,?,?,?,?,?,?)",(runtime_id,client_row,'thread','request','now','/v1/responses','m','succeeded',200)); call_id=c.execute('select last_insert_rowid()').fetchone()[0]
+  c.execute("insert into attempts(call_id,status,request_headers_json) values(?,?,?)",(call_id,'succeeded','{"X-Test":"ok","Authorization":"must-not-print"}')); attempt_id=c.execute('select last_insert_rowid()').fetchone()[0]
+  c.execute("insert into payloads(attempt_id,request_body,response_body,response_truncated,capture_degraded) values(?,?,?,?,?)",(attempt_id,b'request',b'response',1,1))
+ r=subprocess.run([sys.executable,'prompt_harbor.py','show',str(call_id),'--database',str(p)],capture_output=True,text=True)
+ assert r.returncode==0 and 'runtime_session_id' in r.stdout and 'client_session_id' in r.stdout
+ assert 'capture_degraded=1' in r.stdout and 'Authorization' not in r.stdout
 def test_cli_argument_overrides_environment(tmp_path):
  env_path=tmp_path/'env.db'; arg_path=tmp_path/'arg.db'; env=dict(os.environ,PROMPT_HARBOR_DB=str(env_path)); r=subprocess.run([sys.executable,'prompt_harbor.py','init','--database',str(arg_path)],env=env,capture_output=True,text=True); assert r.returncode==0 and arg_path.exists() and not env_path.exists()
 def test_environment_overrides_default(tmp_path):

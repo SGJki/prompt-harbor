@@ -15,7 +15,18 @@ def test_purge_repeat_idempotent(tmp_path):
 def test_business_cascade_without_fk(tmp_path):
  p=tmp_path/'r.db'; g.init(str(p)); c=sqlite3.connect(p); assert c.execute('pragma foreign_keys').fetchone()==(0,)
 def test_sessions_survive_purge(tmp_path):
- p=tmp_path/'r.db'; g.init(str(p)); seed(p,3); g.purge(str(p)); assert sqlite3.connect(p).execute('select count(*) from sessions').fetchone()==(1,)
+    p=tmp_path/'r.db'; g.init(str(p)); seed(p,3); g.purge(str(p)); assert sqlite3.connect(p).execute('select count(*) from sessions').fetchone()==(1,)
+
+
+def test_purge_removes_unreferenced_explicit_sessions(tmp_path):
+    p=tmp_path/'explicit.db'; g.init(str(p))
+    with sqlite3.connect(p) as c:
+        c.execute("insert into runtime_sessions(agent,started_at,last_seen_at) values('x',datetime('now'),datetime('now'))")
+        c.execute("insert into client_sessions(client_session_id,identity_status,identity_source,first_seen_at,last_seen_at) values('orphan','explicit','session-id',datetime('now'),datetime('now'))")
+    assert g.purge(str(p)) == 0
+    with sqlite3.connect(p) as c:
+        assert c.execute("select count(*) from runtime_sessions").fetchone() == (0,)
+        assert c.execute("select count(*) from client_sessions").fetchone() == (0,)
 
 def seed_chain(path, age_days, attempts=1, model='m'):
     stamp=(datetime.now(timezone.utc)-timedelta(days=age_days)).isoformat()

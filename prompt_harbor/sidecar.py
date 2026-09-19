@@ -6,6 +6,7 @@ import os
 import select
 import shlex
 import subprocess
+import threading
 import time
 from typing import Iterable, Optional, Union
 
@@ -33,12 +34,45 @@ class SidecarProcess:
         self.stop_timeout = stop_timeout
         self.env = env
         self.process: Optional[subprocess.Popen[str]] = None
+        self._lock = threading.RLock()
 
     @property
     def configured(self) -> bool:
         return bool(self.url or self.command)
 
+    @property
+    def managed(self) -> bool:
+        return self.command is not None
+
+    def alive(self) -> bool:
+        return self.process is not None and self.process.poll() is None
+
+    def reprobe(self) -> Optional[str]:
+        """Restart only a gateway-owned child after it exited."""
+        with self._lock:
+            if not self.managed or self.alive():
+                return self.url
+            self.process = None
+            self.url = None
+            return self.start()
+
     def start(self) -> Optional[str]:
+        with self._lock:
+            return self._start()
+
+    def _start(self) -> Optional[str]:
+        if self.url:
+            if not self.command:
+                # An externally managed URL is never started or reaped here.
+                try:
+                    validate_sidecar_url(self.url)
+                except ConfigError as exc:
+                    raise SidecarStartupError(f"invalid pi sidecar URL: {exc}") from exc
+                return self.url
+            # A managed command may publish a fresh URL after a crash.
+            if self.process is not None and self.process.poll() is None:
+                return self.url
+            self.url = None
         if self.url:
             try:
                 validate_sidecar_url(self.url)
@@ -98,13 +132,14 @@ class SidecarProcess:
         raise SidecarStartupError(f"pi sidecar did not become ready{': ' + details if details else ''}")
 
     def stop(self) -> None:
-        if self.process is None:
-            return
-        if self.process.poll() is None:
-            self.process.terminate()
-            try:
-                self.process.wait(timeout=self.stop_timeout)
-            except subprocess.TimeoutExpired:
-                self.process.kill()
-                self.process.wait(timeout=self.stop_timeout)
-        self.process = None
+        with self._lock:
+            if self.process is None:
+                return
+            if self.process.poll() is None:
+                self.process.terminate()
+                try:
+                    self.process.wait(timeout=self.stop_timeout)
+                except subprocess.TimeoutExpired:
+                    self.process.kill()
+                    self.process.wait(timeout=self.stop_timeout)
+            self.process = None

@@ -72,14 +72,16 @@ def test_detail_api_reports_truncation_flags(tmp_path):
     finally:
         proc.terminate(); proc.wait(); up.shutdown()
 
-def test_sessions_api_includes_call_count(tmp_path):
+def test_runtime_sessions_api_includes_call_count(tmp_path):
     proc, port, db, up = start_gateway(tmp_path)
     try:
         post_call(port); post_call(port)
         deadline = time.time() + 3
         while time.time() < deadline and sqlite3.connect(db).execute('select count(*) from calls').fetchone()[0] < 2: time.sleep(.05)
-        s, _, body = get(port, '/api/sessions')
-        sessions = json.loads(body)['sessions']
+        s, _, body = get(port, '/api/runtime-sessions')
+        sessions = json.loads(body)['runtime_sessions']
         assert s == 200 and len(sessions) == 1 and sessions[0]['call_count'] == 2
+        s, _, _ = get(port, '/api/sessions')
+        assert s == 404
     finally:
         proc.terminate(); proc.wait(); up.shutdown()

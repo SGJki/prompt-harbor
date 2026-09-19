@@ -4,13 +4,13 @@
 提供参考 session-share 的本地审计台，真实连接 SQLite 数据并实时刷新。
 
 ## 必须交付
-- `ui/` 目录（`index.html`、`css/app.css`、`js/*.js` 原生 ES 模块，无构建步骤），包含 Overview、Calls、Sessions 视图、筛选栏与移动端布局。
+- `ui/` 目录（`index.html`、`css/app.css`、`js/*.js` 原生 ES 模块，无构建步骤），包含 Overview、Calls、Runtime Sessions、Client Sessions 视图、筛选栏与移动端布局。
 - 后端托管 `ui/` 内 `.html/.css/.js` 静态资源（白名单扩展名 + normpath 防路径穿越）。
-- 后端提供 `GET /api/overview`、`GET /api/calls`、`GET /api/sessions`、`GET /api/calls/{id}`（含 usage 与 request/response 截断标记）。
-- 后端提供 SSE `GET /api/events`；连接先发送 `ready`，每次网关完成一个 call 后发送 `invalidate`（`resource=calls`），并通过 SQLite `data_version` 检测直接插入/更新 calls 和 sessions 后发送对应资源事件。
+- 后端提供 `GET /api/overview`、`GET /api/calls`、`GET /api/runtime-sessions`、`GET /api/client-sessions`、`GET /api/calls/{id}`（含 usage 与 request/response/capture 标记）；`/api/sessions` 返回 404。
+- 后端提供 SSE `GET /api/events`；连接先发送 `ready`，每次网关完成一个 call 后发送 `invalidate`（`resource=calls`），并通过 SQLite change log 检测直接插入/更新 calls、runtime sessions 和 client sessions 后发送对应资源事件。
 - 后端提供 `GET /api/config` 和 `PUT /api/config`；字段与 `prompt-harbor.ini` 的 `[gateway]` / `[sidecar]` 配置一一对应，更新先按启动规则校验并原子写回配置文件。可安全热更新的运行时字段立即生效，资源所有权相关字段返回 `restart_required`；敏感 token 只返回 configured 状态。
 - 前端收到 `invalidate` 后按当前视图重新请求数据；轮询仅作为断线兜底。
-- Calls 支持状态和 session 筛选，点击行查看请求、响应、headers、usage 和错误。
+- Calls 支持状态、runtime session 和 client session 筛选，点击行查看请求、响应、headers、usage、thread/request context 和错误。
 - 授权头不得出现在 API 返回或页面内容中。
 - UI、静态资源和 API 响应带有 CSP、`X-Content-Type-Options: nosniff` 与 `Referrer-Policy: no-referrer`；API 使用 `Cache-Control: no-store`。请求仅接受 `127.0.0.1`、`localhost` 和 `[::1]` Host（可带端口），其他 Host 返回 403。
 - `PUT /api/config` 必须携带 `X-Prompt-Harbor-Request: 1`。配置字段返回 `source`（`cli`、`env`、`ini` 或 `default`）；CLI/env 覆盖字段在 UI 中锁定，提交不同值会返回 400。

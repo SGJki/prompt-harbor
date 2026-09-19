@@ -65,12 +65,12 @@ test('audit desk supports navigation, filters, details, refresh and SSE invalida
     await expect(page.locator('#call-detail')).toContainText('Request headers');
     await expect(page.locator('body')).not.toContainText('Authorization');
 
-    await page.getByRole('tab', { name: 'Sessions' }).click();
+    await page.getByRole('tab', { name: 'Runtime Sessions' }).click();
     await expect(page.locator('[data-session-calls]')).toHaveCount(1);
     await page.locator('[data-session-calls]').click();
     await expect(page.getByRole('heading', { name: 'Calls' })).toBeVisible();
     await expect(page.getByRole('tab', { name: 'Calls' })).toHaveAttribute('aria-selected', 'true');
-    await expect(page.getByRole('tab', { name: 'Sessions' })).toHaveAttribute('aria-selected', 'false');
+    await expect(page.getByRole('tab', { name: 'Runtime Sessions' })).toHaveAttribute('aria-selected', 'false');
     await expect(page.locator('[data-filter="session"]')).not.toHaveValue('all');
 
     await page.getByRole('button', { name: 'Refresh' }).click();

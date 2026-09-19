@@ -7,7 +7,7 @@ def db_with_schema(tmp_path):
     p=tmp_path/'x.db'; g.init(str(p)); return p
 
 def test_init_creates_all_tables(tmp_path):
-    p=db_with_schema(tmp_path); names={r[0] for r in sqlite3.connect(p).execute("select name from sqlite_master where type='table'")}; assert {'sessions','calls','attempts','payloads','usage'}<=names
+    p=db_with_schema(tmp_path); names={r[0] for r in sqlite3.connect(p).execute("select name from sqlite_master where type='table'")}; assert {'sessions','runtime_sessions','client_sessions','calls','attempts','payloads','usage'}<=names
 def test_primary_keys_autoincrement(tmp_path):
     p=db_with_schema(tmp_path); c=sqlite3.connect(p)
     for t in ('sessions','calls','attempts','payloads','usage'):
@@ -16,6 +16,17 @@ def test_no_foreign_keys(tmp_path):
     p=db_with_schema(tmp_path); assert not any('FOREIGN KEY' in (r[0] or '').upper() for r in sqlite3.connect(p).execute("select sql from sqlite_master where sql is not null"))
 def test_required_index(tmp_path):
     p=db_with_schema(tmp_path); assert sqlite3.connect(p).execute("select 1 from sqlite_master where type='index' and name='calls_created_idx'").fetchone()
+
+
+def test_explicit_session_indexes_and_capture_columns(tmp_path):
+    p=db_with_schema(tmp_path)
+    with sqlite3.connect(p) as connection:
+        indexes = {row[1] for row in connection.execute("select type,name from sqlite_master where type='index'")}
+        call_columns = {row[1] for row in connection.execute("pragma table_info(calls)")}
+        payload_columns = {row[1] for row in connection.execute("pragma table_info(payloads)")}
+    assert {"calls_runtime_session_idx", "calls_client_session_idx", "calls_thread_idx", "calls_request_correlation_idx"} <= indexes
+    assert {"runtime_session_id", "client_session_row_id", "thread_id", "request_correlation_id", "provider_session_context"} <= call_columns
+    assert "capture_degraded" in payload_columns
 def test_headers_redacted():
     h=g.headers({'Authorization':'x','Cookie':'y','Set-Cookie':'z','Proxy-Authorization':'p','X-Test':'ok'}); assert h=={'X-Test':'ok'}
 def test_usage_json(): assert g.extract_usage(b'{"usage":{"input_tokens":1}}')['input_tokens']==1
@@ -25,6 +36,17 @@ def test_default_constants(): assert g.DEFAULT_LISTEN=='127.0.0.1:8787' and g.DE
 def test_iso_format(): assert 'T' in g.iso()
 def test_purge_empty(tmp_path): assert g.purge(str(db_with_schema(tmp_path)))==0
 def test_schema_idempotent(tmp_path): p=db_with_schema(tmp_path); g.init(str(p)); assert sqlite3.connect(p).execute('select count(*) from sessions').fetchone()==(0,)
+
+
+def test_legacy_database_is_discarded_before_new_indexes(tmp_path):
+    path = tmp_path / "legacy.db"
+    with sqlite3.connect(path) as connection:
+        connection.executescript("create table sessions(id integer primary key); create table calls(id integer primary key, session_id integer); insert into sessions values(7);")
+    g.init(str(path))
+    with sqlite3.connect(path) as connection:
+        assert connection.execute("select count(*) from sessions").fetchone() == (0,)
+        assert connection.execute("pragma table_info(calls)").fetchall()[1][1] == "session_id"
+        assert connection.execute("select name from sqlite_master where type='index' and name='calls_runtime_session_idx'").fetchone()
 class ExtractionUpstream(BaseHTTPRequestHandler):
     def do_POST(self):
         n=int(self.headers.get('Content-Length','0')); self.rfile.read(n)

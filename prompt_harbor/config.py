@@ -28,6 +28,8 @@ DEFAULT_API_CALL_LIMIT = 200
 DEFAULT_CLI_CALL_LIMIT = 50
 DEFAULT_SSE_KEEPALIVE = 15.0
 DEFAULT_PURGE_INTERVAL = 24 * 60 * 60.0
+DEFAULT_CLIENT_IDENTITY_MODE = "default"
+DEFAULT_CAPTURE_BUDGET = DEFAULT_MAX_BODY * 4
 
 
 class ConfigError(ValueError):
@@ -106,6 +108,8 @@ class Settings:
     listen: str = DEFAULT_LISTEN
     upstream: str = DEFAULT_UPSTREAM
     max_body: int = DEFAULT_MAX_BODY
+    client_identity_mode: str = DEFAULT_CLIENT_IDENTITY_MODE
+    capture_budget: int = DEFAULT_CAPTURE_BUDGET
     retention_days: int = DEFAULT_RETENTION_DAYS
     db_timeout: float = DEFAULT_DB_TIMEOUT
     upstream_timeout: float = DEFAULT_UPSTREAM_TIMEOUT
@@ -132,6 +136,8 @@ CONFIG_FIELDS = {
     "listen": {"section": "gateway", "key": "listen", "kind": "string", "restart_required": True},
     "upstream": {"section": "gateway", "key": "upstream", "kind": "string", "restart_required": False},
     "max_body": {"section": "gateway", "key": "max_body", "kind": "integer", "restart_required": False},
+    "client_identity_mode": {"section": "gateway", "key": "client_identity_mode", "kind": "identity_mode", "restart_required": False},
+    "capture_budget": {"section": "gateway", "key": "capture_budget", "kind": "integer", "restart_required": False},
     "retention_days": {"section": "gateway", "key": "retention_days", "kind": "integer", "restart_required": False},
     "db_timeout": {"section": "gateway", "key": "db_timeout", "kind": "number", "restart_required": False},
     "upstream_timeout": {"section": "gateway", "key": "upstream_timeout", "kind": "number", "restart_required": False},
@@ -207,6 +213,10 @@ def load_settings(cli: argparse.Namespace) -> Settings:
     parser = _read_config(config_path, explicit=bool(cli_config or env_config))
 
     integer = lambda field, section, key, env, default: _convert(field, _raw_value(cli, parser, field, section, key, env, default), int, lambda value: value > 0)
+    identity_mode = lambda: str(_raw_value(cli, parser, "client_identity_mode", "gateway", "client_identity_mode", "PROMPT_HARBOR_CLIENT_IDENTITY_MODE", DEFAULT_CLIENT_IDENTITY_MODE)).strip().lower()
+    selected_identity_mode = identity_mode()
+    if selected_identity_mode not in {"default", "strict"}:
+        raise ConfigError(f"client_identity_mode has invalid value: {selected_identity_mode!r}")
     number = lambda field, section, key, env, default: _convert(field, _raw_value(cli, parser, field, section, key, env, default), float, lambda value: math.isfinite(value) and value > 0)
     string = lambda field, section, key, env, default: str(_raw_value(cli, parser, field, section, key, env, default)).strip()
     optional = lambda field, section, key, env: _optional(_raw_value(cli, parser, field, section, key, env, ""))
@@ -224,6 +234,8 @@ def load_settings(cli: argparse.Namespace) -> Settings:
         upstream=upstream,
         upstream_warnings=upstream_warnings,
         max_body=integer("max_body", "gateway", "max_body", "PROMPT_HARBOR_MAX_BODY", DEFAULT_MAX_BODY),
+        client_identity_mode=selected_identity_mode,
+        capture_budget=integer("capture_budget", "gateway", "capture_budget", "PROMPT_HARBOR_CAPTURE_BUDGET", DEFAULT_CAPTURE_BUDGET),
         retention_days=integer("retention_days", "gateway", "retention_days", "PROMPT_HARBOR_RETENTION_DAYS", DEFAULT_RETENTION_DAYS),
         db_timeout=number("db_timeout", "gateway", "db_timeout", "PROMPT_HARBOR_DB_TIMEOUT", DEFAULT_DB_TIMEOUT),
         upstream_timeout=number("upstream_timeout", "gateway", "upstream_timeout", "PROMPT_HARBOR_UPSTREAM_TIMEOUT", DEFAULT_UPSTREAM_TIMEOUT),
@@ -252,6 +264,7 @@ def resolve_sources(cli: argparse.Namespace) -> dict[str, str]:
     env_names = {
         "database": "PROMPT_HARBOR_DB", "listen": "PROMPT_HARBOR_LISTEN", "upstream": "PROMPT_HARBOR_UPSTREAM",
         "max_body": "PROMPT_HARBOR_MAX_BODY", "retention_days": "PROMPT_HARBOR_RETENTION_DAYS",
+        "client_identity_mode": "PROMPT_HARBOR_CLIENT_IDENTITY_MODE", "capture_budget": "PROMPT_HARBOR_CAPTURE_BUDGET",
         "db_timeout": "PROMPT_HARBOR_DB_TIMEOUT", "upstream_timeout": "PROMPT_HARBOR_UPSTREAM_TIMEOUT",
         "sidecar_timeout": "PROMPT_HARBOR_SIDECAR_TIMEOUT", "sidecar_start_timeout": "PROMPT_HARBOR_PI_SIDECAR_START_TIMEOUT",
         "sidecar_stop_timeout": "PROMPT_HARBOR_PI_SIDECAR_STOP_TIMEOUT", "api_call_limit": "PROMPT_HARBOR_API_CALL_LIMIT",

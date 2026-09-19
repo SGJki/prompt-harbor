@@ -14,7 +14,7 @@ from contextlib import closing
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.error import HTTPError
-from urllib.parse import unquote, urlparse, urlsplit
+from urllib.parse import parse_qs, unquote, urlparse, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from .config import (
@@ -39,6 +39,11 @@ from .config import (
     write_config,
 )
 from .headers import sanitize
+from .events import commit_then_notify
+from .identity import IdentityRequiredError, resolve_identity
+from .lifecycle import call_outcome
+from .storage import configure as configure_db
+from .transport import CaptureBudget, capture_chunk
 from .pi_messages import PiMessagesState, normalize_usage, split_model_id
 from .sidecar import SidecarProcess, SidecarStartupError
 
@@ -80,21 +85,26 @@ def iso(ts=None):
 
 
 def db(path, timeout=DEFAULT_DB_TIMEOUT):
-    connection = sqlite3.connect(path, timeout=timeout)
-    connection.row_factory = sqlite3.Row
-    return connection
+    return configure_db(sqlite3.connect(path, timeout=timeout), timeout)
 
 
 def schema(connection):
     connection.executescript(
         """
+        CREATE TABLE IF NOT EXISTS runtime_sessions(id INTEGER PRIMARY KEY AUTOINCREMENT,agent TEXT,started_at TEXT,last_seen_at TEXT,cwd TEXT,project_name TEXT,metadata_json TEXT);
+        CREATE TABLE IF NOT EXISTS client_sessions(id INTEGER PRIMARY KEY AUTOINCREMENT,client_session_id TEXT NOT NULL,identity_status TEXT NOT NULL,identity_source TEXT NOT NULL,first_seen_at TEXT NOT NULL,last_seen_at TEXT NOT NULL,metadata_json TEXT NOT NULL DEFAULT '{}');
+        CREATE UNIQUE INDEX IF NOT EXISTS client_sessions_explicit_idx ON client_sessions(client_session_id) WHERE identity_status='explicit';
         CREATE TABLE IF NOT EXISTS sessions(id INTEGER PRIMARY KEY AUTOINCREMENT,agent TEXT,started_at TEXT,last_seen_at TEXT,cwd TEXT,project_name TEXT,metadata_json TEXT);
-        CREATE TABLE IF NOT EXISTS calls(id INTEGER PRIMARY KEY AUTOINCREMENT,session_id INTEGER,created_at TEXT,completed_at TEXT,provider TEXT,api_family TEXT,endpoint TEXT,model TEXT,stream INTEGER,status TEXT,status_code INTEGER,first_byte_at TEXT,duration_ms INTEGER,input_bytes INTEGER DEFAULT 0,output_bytes INTEGER DEFAULT 0,error_type TEXT,error_message TEXT);
+        CREATE TABLE IF NOT EXISTS calls(id INTEGER PRIMARY KEY AUTOINCREMENT,session_id INTEGER,runtime_session_id INTEGER,client_session_row_id INTEGER,thread_id TEXT,request_correlation_id TEXT,provider_session_context TEXT,created_at TEXT,completed_at TEXT,provider TEXT,api_family TEXT,endpoint TEXT,model TEXT,stream INTEGER,status TEXT,status_code INTEGER,first_byte_at TEXT,duration_ms INTEGER,input_bytes INTEGER DEFAULT 0,output_bytes INTEGER DEFAULT 0,error_type TEXT,error_message TEXT);
         CREATE TABLE IF NOT EXISTS attempts(id INTEGER PRIMARY KEY AUTOINCREMENT,call_id INTEGER,attempt_no INTEGER,started_at TEXT,completed_at TEXT,upstream_url TEXT,status TEXT,status_code INTEGER,request_headers_json TEXT,response_headers_json TEXT,first_byte_at TEXT,duration_ms INTEGER,input_bytes INTEGER DEFAULT 0,output_bytes INTEGER DEFAULT 0,error_type TEXT,error_message TEXT);
-        CREATE TABLE IF NOT EXISTS payloads(id INTEGER PRIMARY KEY AUTOINCREMENT,attempt_id INTEGER UNIQUE,request_body BLOB,response_body BLOB,request_content_type TEXT,response_content_type TEXT,response_complete INTEGER DEFAULT 0,request_truncated INTEGER DEFAULT 0,response_truncated INTEGER DEFAULT 0,created_at TEXT,updated_at TEXT);
+        CREATE TABLE IF NOT EXISTS payloads(id INTEGER PRIMARY KEY AUTOINCREMENT,attempt_id INTEGER UNIQUE,request_body BLOB,response_body BLOB,request_content_type TEXT,response_content_type TEXT,response_complete INTEGER DEFAULT 0,request_truncated INTEGER DEFAULT 0,response_truncated INTEGER DEFAULT 0,capture_degraded INTEGER DEFAULT 0,created_at TEXT,updated_at TEXT);
         CREATE TABLE IF NOT EXISTS usage(id INTEGER PRIMARY KEY AUTOINCREMENT,attempt_id INTEGER UNIQUE,input_tokens INTEGER,output_tokens INTEGER,total_tokens INTEGER,raw_usage_json TEXT);
         CREATE TABLE IF NOT EXISTS change_log(id INTEGER PRIMARY KEY AUTOINCREMENT,resource TEXT NOT NULL,changed_at TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS calls_created_idx ON calls(created_at);
+        CREATE INDEX IF NOT EXISTS calls_runtime_session_idx ON calls(runtime_session_id,created_at);
+        CREATE INDEX IF NOT EXISTS calls_client_session_idx ON calls(client_session_row_id,created_at);
+        CREATE INDEX IF NOT EXISTS calls_thread_idx ON calls(thread_id);
+        CREATE INDEX IF NOT EXISTS calls_request_correlation_idx ON calls(request_correlation_id);
         CREATE INDEX IF NOT EXISTS change_log_id_idx ON change_log(id);
         CREATE INDEX IF NOT EXISTS change_log_changed_at_idx ON change_log(changed_at);
         CREATE TRIGGER IF NOT EXISTS calls_change_insert AFTER INSERT ON calls BEGIN INSERT INTO change_log(resource,changed_at) VALUES('calls',CURRENT_TIMESTAMP); END;
@@ -102,10 +112,14 @@ def schema(connection):
         CREATE TRIGGER IF NOT EXISTS calls_change_delete AFTER DELETE ON calls BEGIN INSERT INTO change_log(resource,changed_at) VALUES('calls',CURRENT_TIMESTAMP); END;
         CREATE TRIGGER IF NOT EXISTS sessions_change_insert AFTER INSERT ON sessions BEGIN INSERT INTO change_log(resource,changed_at) VALUES('sessions',CURRENT_TIMESTAMP); END;
         CREATE TRIGGER IF NOT EXISTS sessions_change_delete AFTER DELETE ON sessions BEGIN INSERT INTO change_log(resource,changed_at) VALUES('sessions',CURRENT_TIMESTAMP); END;
+        CREATE TRIGGER IF NOT EXISTS runtime_sessions_change_insert AFTER INSERT ON runtime_sessions BEGIN INSERT INTO change_log(resource,changed_at) VALUES('runtime-sessions',CURRENT_TIMESTAMP); END;
+        CREATE TRIGGER IF NOT EXISTS runtime_sessions_change_update AFTER UPDATE ON runtime_sessions BEGIN INSERT INTO change_log(resource,changed_at) VALUES('runtime-sessions',CURRENT_TIMESTAMP); END;
+        CREATE TRIGGER IF NOT EXISTS runtime_sessions_change_delete AFTER DELETE ON runtime_sessions BEGIN INSERT INTO change_log(resource,changed_at) VALUES('runtime-sessions',CURRENT_TIMESTAMP); END;
+        CREATE TRIGGER IF NOT EXISTS client_sessions_change_insert AFTER INSERT ON client_sessions BEGIN INSERT INTO change_log(resource,changed_at) VALUES('client-sessions',CURRENT_TIMESTAMP); END;
+        CREATE TRIGGER IF NOT EXISTS client_sessions_change_update AFTER UPDATE ON client_sessions BEGIN INSERT INTO change_log(resource,changed_at) VALUES('client-sessions',CURRENT_TIMESTAMP); END;
+        CREATE TRIGGER IF NOT EXISTS client_sessions_change_delete AFTER DELETE ON client_sessions BEGIN INSERT INTO change_log(resource,changed_at) VALUES('client-sessions',CURRENT_TIMESTAMP); END;
         """
     )
-    # Recreate this trigger so existing databases receive the complete mutable
-    # column set, including last_seen_at added after the original schema.
     connection.executescript(
         """
         DROP TRIGGER IF EXISTS sessions_change_update;
@@ -119,6 +133,22 @@ def schema(connection):
 
 
 def init(path, timeout=DEFAULT_DB_TIMEOUT):
+    if os.path.exists(path):
+        with closing(sqlite3.connect(path)) as probe:
+            tables = {row[0] for row in probe.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            call_columns = {row[1] for row in probe.execute("PRAGMA table_info(calls)")} if "calls" in tables else set()
+            payload_columns = {row[1] for row in probe.execute("PRAGMA table_info(payloads)")} if "payloads" in tables else set()
+            legacy = "runtime_sessions" not in tables or "client_sessions" not in tables or {
+                "runtime_session_id", "client_session_row_id", "thread_id", "request_correlation_id",
+            } - call_columns or "capture_degraded" not in payload_columns
+        if legacy:
+            # The project is pre-deployment: discard the pre-feature schema
+            # instead of attempting a partial migration.
+            for suffix in ("", "-wal", "-shm"):
+                try:
+                    os.unlink(path + suffix)
+                except FileNotFoundError:
+                    pass
     with closing(db(path, timeout)) as connection:
         schema(connection)
         connection.commit()
@@ -165,6 +195,28 @@ def extract_usage(data):
     return None
 
 
+def finalize_pi_stream(record, state, *, sidecar_crashed=False):
+    """Apply protocol outcome without overwriting a managed-child crash."""
+    state.finish()
+    if sidecar_crashed:
+        return
+    record["response_complete"] = state.complete or record["status"] >= 400
+    if record["status"] >= 400:
+        record["state"], record["error_type"] = "failed", "sidecar_http"
+        record["error_message"] = "sidecar HTTP error"
+    elif state.terminal_type == "done" and state.protocol_error is None:
+        record["state"] = "succeeded"
+    elif state.terminal_type == "done":
+        record["state"], record["error_type"], record["error_message"] = "failed", "pi_protocol", state.protocol_error
+    elif state.terminal_type == "error":
+        record["state"], record["error_type"] = "failed", "pi_error"
+        record["error_message"] = state.error_message or state.terminal_reason or "pi-ai error"
+    elif state.protocol_error:
+        record["state"], record["error_type"], record["error_message"] = "failed", "pi_protocol", state.protocol_error
+    else:
+        record["state"], record["error_type"], record["error_message"] = "failed", "upstream_incomplete", "pi-messages stream ended without a terminal event"
+
+
 def body_limit(configured=None):
     raw = configured if configured is not None else os.getenv("PROMPT_HARBOR_MAX_BODY", str(DEFAULT_MAX_BODY))
     try:
@@ -183,7 +235,8 @@ class Handler(BaseHTTPRequestHandler):
     upstream = DEFAULT_UPSTREAM
     sidecar_url = None
     sidecar_token = None
-    session_id = None
+    runtime_session_id = None
+    session_id = None  # legacy mirror; new API semantics use runtime_session_id
     db_timeout = DEFAULT_DB_TIMEOUT
     capture_max_body = None
     upstream_timeout = DEFAULT_UPSTREAM_TIMEOUT
@@ -196,7 +249,11 @@ class Handler(BaseHTTPRequestHandler):
     config_settings = {}
     config_sources = {}
     sidecar_managed = False
+    sidecar_manager = None
     gateway_server = None
+    identity_mode = "default"
+    capture_budget_limit = DEFAULT_MAX_BODY * 4
+    capture_budget = None
 
     @staticmethod
     def _json_error(message):
@@ -311,11 +368,15 @@ class Handler(BaseHTTPRequestHandler):
         created = iso(started)
         limit = body_limit(self.capture_max_body)
         request_size = input_bytes if input_bytes is not None else len(body)
+        identity = resolve_identity(self.headers, body, strict=self.identity_mode == "strict")
+        from .models import resolve_client_session
         with closing(db(self.db_path, self.db_timeout)) as connection:
-            connection.execute("UPDATE sessions SET last_seen_at=? WHERE id=?", (created, self.session_id))
+            client_session_row_id = resolve_client_session(connection, identity.client_session_id, identity.identity_status, identity.identity_source, created)
+            connection.execute("UPDATE runtime_sessions SET last_seen_at=? WHERE id=?", (created, self.runtime_session_id))
+            connection.execute("UPDATE sessions SET last_seen_at=? WHERE id=?", (created, self.runtime_session_id))
             cursor = connection.execute(
-                "INSERT INTO calls(session_id,created_at,provider,api_family,endpoint,model,stream,status,input_bytes) VALUES(?,?,?,?,?,?,?,?,?)",
-                (self.session_id, created, provider, api_family, self.path, model, int(bool(stream)), "running", request_size),
+                "INSERT INTO calls(session_id,runtime_session_id,client_session_row_id,thread_id,request_correlation_id,provider_session_context,created_at,provider,api_family,endpoint,model,stream,status,input_bytes) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (self.runtime_session_id, self.runtime_session_id, client_session_row_id, identity.thread_id, identity.request_correlation_id, identity.provider_session_context, created, provider, api_family, self.path, model, int(bool(stream)), "running", request_size),
             )
             call_id = cursor.lastrowid
             cursor = connection.execute(
@@ -333,6 +394,7 @@ class Handler(BaseHTTPRequestHandler):
             "out": bytearray(), "total_out": 0, "response_truncated": False, "first": None,
             "status": None, "response_headers": {}, "response_content_type": None,
             "state": "failed", "error_type": None, "error_message": None, "response_complete": False,
+            "capture_degraded": False, "client_session_row_id": client_session_row_id, "capture_budget": self.capture_budget,
         }
 
     def _begin_configuration_failure(self, body, model, stream, provider, api_family, target, error, input_bytes=None):
@@ -340,11 +402,18 @@ class Handler(BaseHTTPRequestHandler):
         started = time.time()
         created = iso(started)
         request_size = len(body) if input_bytes is None else input_bytes
+        # Configuration failures still belong to both explicit session scopes;
+        # use default identity resolution so a malformed request is not left
+        # without an auditable client-session row.
+        identity = resolve_identity(self.headers, body, strict=False)
+        from .models import resolve_client_session
         with closing(db(self.db_path, self.db_timeout)) as connection:
-            connection.execute("UPDATE sessions SET last_seen_at=? WHERE id=?", (created, self.session_id))
+            client_session_row_id = resolve_client_session(connection, identity.client_session_id, identity.identity_status, identity.identity_source, created)
+            connection.execute("UPDATE runtime_sessions SET last_seen_at=? WHERE id=?", (created, self.runtime_session_id))
+            connection.execute("UPDATE sessions SET last_seen_at=? WHERE id=?", (created, self.runtime_session_id))
             cursor = connection.execute(
-                "INSERT INTO calls(session_id,created_at,provider,api_family,endpoint,model,stream,status,input_bytes,error_type,error_message) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                (self.session_id, created, provider, api_family, self.path, model, int(bool(stream)), "failed", request_size, "configuration_error", str(error)),
+                "INSERT INTO calls(session_id,runtime_session_id,client_session_row_id,thread_id,request_correlation_id,provider_session_context,created_at,provider,api_family,endpoint,model,stream,status,input_bytes,error_type,error_message) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (self.runtime_session_id, self.runtime_session_id, client_session_row_id, identity.thread_id, identity.request_correlation_id, identity.provider_session_context, created, provider, api_family, self.path, model, int(bool(stream)), "failed", request_size, "configuration_error", str(error)),
             )
             call_id = cursor.lastrowid
             cursor = connection.execute(
@@ -352,16 +421,14 @@ class Handler(BaseHTTPRequestHandler):
                 (call_id, 1, created, created, target, "failed", 400, json.dumps(headers(self.headers), ensure_ascii=False), request_size, "configuration_error", str(error)),
             )
             attempt_id = cursor.lastrowid
-            connection.execute(
-                "INSERT INTO payloads(attempt_id,request_body,request_content_type,response_complete,request_truncated,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
-                (attempt_id, body[:DEFAULT_MAX_BODY], self.headers.get("Content-Type"), 1, 0, created, created),
-            )
+            connection.execute("INSERT INTO payloads(attempt_id,request_body,request_content_type,response_complete,request_truncated,created_at,updated_at) VALUES(?,?,?,?,?,?,?)", (attempt_id, body[:DEFAULT_MAX_BODY], self.headers.get("Content-Type"), 1, 0, created, created))
             connection.commit()
         return {
             "started": started, "call_id": call_id, "attempt_id": attempt_id, "limit": DEFAULT_MAX_BODY,
             "out": bytearray(), "total_out": 0, "response_truncated": False, "first": None,
             "status": 400, "response_headers": {}, "response_content_type": "application/json",
-            "state": "failed", "error_type": "configuration_error", "error_message": str(error), "response_complete": True,
+            "state": "failed", "error_type": "configuration_error", "error_message": str(error), "response_complete": True, "capture_degraded": False,
+            "capture_budget": self.capture_budget,
         }
 
     def _send_json_error(self, status, message):
@@ -370,16 +437,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.flush()
 
     def _capture_chunk(self, record, chunk):
-        if not chunk:
-            return
-        if record["first"] is None:
-            record["first"] = time.time()
-        record["total_out"] += len(chunk)
-        remaining = max(0, record["limit"] - len(record["out"]))
-        if remaining:
-            record["out"].extend(chunk[:remaining])
-        if record["total_out"] > record["limit"]:
-            record["response_truncated"] = True
+        capture_chunk(record, chunk, record.get("capture_budget", self.capture_budget))
 
     @staticmethod
     def _response_content_length(header_map):
@@ -390,7 +448,7 @@ class Handler(BaseHTTPRequestHandler):
             raise ValueError("invalid upstream Content-Length header")
         return int(values[0].strip())
 
-    def _finish_attempt(self, record, usage=None, raw_usage=None):
+    def _persist_attempt_once(self, record, usage=None, raw_usage=None):
         done = time.time()
         values = (
             iso(done), record["state"], record["status"], json.dumps(record["response_headers"], ensure_ascii=False),
@@ -400,13 +458,30 @@ class Handler(BaseHTTPRequestHandler):
         with closing(db(self.db_path, self.db_timeout)) as connection:
             connection.execute("UPDATE attempts SET completed_at=?,status=?,status_code=?,response_headers_json=?,first_byte_at=?,duration_ms=?,output_bytes=?,error_type=?,error_message=? WHERE id=?", values)
             connection.execute("UPDATE calls SET completed_at=?,status=?,status_code=?,first_byte_at=?,duration_ms=?,output_bytes=?,error_type=?,error_message=? WHERE id=?", values[:1] + values[1:2] + values[2:3] + values[4:9] + (record["call_id"],))
-            connection.execute("UPDATE payloads SET response_body=?,response_content_type=?,response_complete=?,response_truncated=?,updated_at=? WHERE attempt_id=?", (bytes(record["out"]), record["response_content_type"], int(record["response_complete"]), int(record["response_truncated"]), iso(done), record["attempt_id"]))
+            connection.execute("UPDATE payloads SET response_body=?,response_content_type=?,response_complete=?,response_truncated=?,capture_degraded=?,updated_at=? WHERE attempt_id=?", (bytes(record["out"]), record["response_content_type"], int(record["response_complete"]), int(record["response_truncated"]), int(record.get("capture_degraded", False)), iso(done), record["attempt_id"]))
             normalized = normalize_usage(usage)
             if normalized:
                 raw_value = raw_usage if isinstance(raw_usage, dict) else usage if isinstance(usage, dict) else normalized
                 connection.execute("INSERT OR REPLACE INTO usage(attempt_id,input_tokens,output_tokens,total_tokens,raw_usage_json) VALUES(?,?,?,?,?)", (record["attempt_id"], normalized.get("input_tokens"), normalized.get("output_tokens"), normalized.get("total_tokens"), json.dumps(raw_value, ensure_ascii=False)))
-            connection.commit()
-        self._notify_resources({"calls"})
+            commit_then_notify(connection, self._notify_resources, {"calls"})
+        capture_budget = record.get("capture_budget", self.capture_budget)
+        if capture_budget is not None:
+            capture_budget.release(len(record.get("out", b"")))
+
+    def _finish_attempt(self, record, usage=None, raw_usage=None):
+        """Persist terminal state with bounded retries for transient SQLite locks."""
+        from .storage import with_retry
+        try:
+            with_retry(lambda: self._persist_attempt_once(record, usage, raw_usage), attempts=5)
+        except sqlite3.OperationalError as exc:
+            # Forwarding has already completed. Do not turn an exhausted audit
+            # retry into a request-thread failure or retain the capture buffer.
+            if "locked" not in str(exc).lower() and "busy" not in str(exc).lower():
+                raise
+            capture_budget = record.get("capture_budget", self.capture_budget)
+            if capture_budget is not None:
+                capture_budget.release(len(record.get("out", b"")))
+            record["audit_persistence_degraded"] = True
 
     @staticmethod
     def _event_bytes(resource):
@@ -437,6 +512,10 @@ class Handler(BaseHTTPRequestHandler):
         target = self.upstream.rstrip("/") + self.path
         try:
             record = self._begin_attempt(body, model, stream, "openai", "openai", target)
+        except IdentityRequiredError as exc:
+            self._send_json_error(400, str(exc))
+            self.close_connection = True
+            return
         except (ConfigError, ValueError) as exc:
             record = self._begin_configuration_failure(body, model, stream, "openai", "openai", target, exc)
             self._send_json_error(400, str(exc))
@@ -477,6 +556,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.flush()
             record["response_complete"] = expected is None or record["total_out"] == expected
             incomplete = not record["response_complete"]
+            # Transparent upstream disconnects retain the historical failed
+            # call status; the error_type carries the incomplete distinction.
             record["state"] = "succeeded" if record["status"] < 400 and not incomplete else "failed"
             if incomplete:
                 record["error_type"], record["error_message"] = "upstream_incomplete", "incomplete upstream response"
@@ -505,10 +586,23 @@ class Handler(BaseHTTPRequestHandler):
     def _handle_pi_messages(self, body):
         parsed, model, _ = self._request_metadata(body)
         provider, _ = split_model_id(model)
+        manager = getattr(self.gateway_server, "sidecar_manager", None)
+        if manager is not None and manager.managed and not manager.alive():
+            try:
+                self.sidecar_url = manager.reprobe()
+                self.sidecar_managed = True
+                if self.gateway_server is not None:
+                    self.gateway_server.sidecar_process = manager.process
+            except SidecarStartupError:
+                self.sidecar_url = None
         target = (self.sidecar_url.rstrip("/") + "/messages") if self.sidecar_url else "sidecar://unavailable/messages"
-        safe_body = self._safe_pi_body(parsed, body)
+        safe_body = self._safe_pi_body(parsed, body) if isinstance(parsed, dict) else b""
         try:
             record = self._begin_attempt(safe_body, model, True, provider or "pi-ai", "pi-messages", target, input_bytes=len(body))
+        except IdentityRequiredError as exc:
+            self._send_json_error(400, str(exc))
+            self.close_connection = True
+            return
         except (ConfigError, ValueError) as exc:
             record = self._begin_configuration_failure(safe_body, model, True, provider or "pi-ai", "pi-messages", target, exc, input_bytes=len(body))
             self._send_json_error(400, str(exc))
@@ -550,7 +644,13 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_header(key, value)
             self.end_headers()
             response_started = True
+            sidecar_crashed = False
             while True:
+                if self.sidecar_managed and getattr(self.gateway_server, "sidecar_process", None) is not None and self.gateway_server.sidecar_process.poll() is not None:
+                    record["state"], record["error_type"], record["error_message"] = "failed", "sidecar_crash", "managed sidecar exited during stream"
+                    record["response_complete"] = False
+                    sidecar_crashed = True
+                    break
                 chunk = response.read(8192)
                 if not chunk:
                     break
@@ -558,22 +658,7 @@ class Handler(BaseHTTPRequestHandler):
                 state.feed(chunk)
                 self.wfile.write(chunk)
                 self.wfile.flush()
-            state.finish()
-            record["response_complete"] = state.complete or record["status"] >= 400
-            if record["status"] >= 400:
-                record["state"], record["error_type"] = "failed", "sidecar_http"
-                record["error_message"] = "sidecar HTTP error"
-            elif state.terminal_type == "done" and state.protocol_error is None:
-                record["state"] = "succeeded"
-            elif state.terminal_type == "done":
-                record["state"], record["error_type"], record["error_message"] = "failed", "pi_protocol", state.protocol_error
-            elif state.terminal_type == "error":
-                record["state"], record["error_type"] = "failed", "pi_error"
-                record["error_message"] = state.error_message or state.terminal_reason or "pi-ai error"
-            elif state.protocol_error:
-                record["state"], record["error_type"], record["error_message"] = "failed", "pi_protocol", state.protocol_error
-            else:
-                record["state"], record["error_type"], record["error_message"] = "failed", "upstream_incomplete", "pi-messages stream ended without a terminal event"
+            finalize_pi_stream(record, state, sidecar_crashed=sidecar_crashed)
             self.close_connection = True
         except (BrokenPipeError, ConnectionResetError):
             record["state"], record["error_type"], record["error_message"] = "failed", "client_cancel", "client disconnected"
@@ -677,11 +762,11 @@ class Handler(BaseHTTPRequestHandler):
             except (TypeError, ValueError):
                 self.send_error(400); return
             with closing(db(self.db_path, self.db_timeout)) as connection:
-                row = connection.execute("SELECT c.*,a.request_headers_json,a.response_headers_json,p.request_body,p.response_body,p.request_truncated,p.response_truncated,u.input_tokens,u.output_tokens,u.total_tokens,u.raw_usage_json FROM calls c LEFT JOIN attempts a ON a.call_id=c.id LEFT JOIN payloads p ON p.attempt_id=a.id LEFT JOIN usage u ON u.attempt_id=a.id WHERE c.id=?", (call_id,)).fetchone()
+                row = connection.execute("SELECT c.*,cs.client_session_id,a.request_headers_json,a.response_headers_json,p.request_body,p.response_body,p.request_truncated,p.response_truncated,p.capture_degraded,u.input_tokens,u.output_tokens,u.total_tokens,u.raw_usage_json FROM calls c LEFT JOIN client_sessions cs ON cs.id=c.client_session_row_id LEFT JOIN attempts a ON a.call_id=c.id LEFT JOIN payloads p ON p.attempt_id=a.id LEFT JOIN usage u ON u.attempt_id=a.id WHERE c.id=?", (call_id,)).fetchone()
             if not row:
                 self.send_error(404); return
             value = dict(row)
-            value["request_headers_json"] = json.loads(value["request_headers_json"] or "{}"); value["response_headers_json"] = json.loads(value["response_headers_json"] or "{}")
+            value["request_headers_json"] = headers(json.loads(value["request_headers_json"] or "{}")); value["response_headers_json"] = headers(json.loads(value["response_headers_json"] or "{}"))
             for key in ("request_body", "response_body"):
                 if isinstance(value.get(key), bytes): value[key] = value[key].decode("utf-8", errors="replace")
             raw = json.dumps(value, ensure_ascii=False).encode(); self._send_payload(200, raw, api=True); return
@@ -718,17 +803,87 @@ class Handler(BaseHTTPRequestHandler):
                     self._sse_connection.close()
                 self._sse_connection = None
             return
-        if self.path not in ("/api/overview", "/api/calls", "/api/sessions"):
+        parsed_path = urlparse(self.path)
+        route = parsed_path.path
+        if route == "/api/sessions":
+            self.send_error(404)
+            return
+        if route not in ("/api/overview", "/api/calls", "/api/runtime-sessions", "/api/client-sessions"):
             if self.path.startswith("/api/"): self.send_error(404); return
             self.static(); return
+        query = {key: values[0] for key, values in parse_qs(parsed_path.query).items() if values}
+
+        def bounded_limit(raw):
+            if raw in (None, ""):
+                return self.api_call_limit
+            try:
+                value = int(raw)
+            except (TypeError, ValueError):
+                raise ValueError("limit must be a positive integer") from None
+            if value <= 0:
+                raise ValueError("limit must be a positive integer")
+            return min(value, self.api_call_limit)
+
+        try:
+            limit = bounded_limit(query.get("limit"))
+        except ValueError as exc:
+            self._send_payload(400, self._json_error(str(exc)), api=True)
+            return
         with closing(db(self.db_path, self.db_timeout)) as connection:
-            calls = [dict(row) for row in connection.execute("SELECT id,session_id,created_at,completed_at,endpoint,model,status,status_code,duration_ms,input_bytes,output_bytes,error_type FROM calls ORDER BY id DESC LIMIT ?", (self.api_call_limit,))]
-            sessions = [dict(row) for row in connection.execute("SELECT s.id,s.agent,s.started_at,s.last_seen_at,s.cwd,s.project_name,(SELECT COUNT(*) FROM calls x WHERE x.session_id=s.id) AS call_count FROM sessions s ORDER BY s.id DESC")]
-        payload = {"calls": calls, "sessions": sessions}
-        if self.path == "/api/overview":
+            params = []
+            where = []
+            for field in ("runtime_session_id", "thread_id", "request_correlation_id"):
+                if query.get(field):
+                    where.append(f"c.{field}=?"); params.append(query[field])
+            if query.get("client_session_id"):
+                where.append("cs.client_session_id=?"); params.append(query["client_session_id"])
+            if query.get("status"):
+                where.append("c.status=?"); params.append(query["status"])
+            if query.get("before"):
+                try:
+                    before = int(query["before"])
+                except ValueError:
+                    self._send_payload(400, self._json_error("before must be an integer cursor"), api=True)
+                    return
+                where.append("c.id<?"); params.append(before)
+            where_sql = " WHERE " + " AND ".join(where) if where else ""
+            calls = [dict(row) for row in connection.execute("SELECT c.id,c.session_id,c.runtime_session_id,c.client_session_row_id,cs.client_session_id,c.thread_id,c.request_correlation_id,c.provider_session_context,c.created_at,c.completed_at,c.endpoint,c.model,c.status,c.status_code,c.duration_ms,c.input_bytes,c.output_bytes,c.error_type FROM calls c LEFT JOIN client_sessions cs ON cs.id=c.client_session_row_id" + where_sql + " ORDER BY c.id DESC LIMIT ?", (*params, limit))]
+
+            runtime_where = []
+            runtime_params = []
+            if query.get("id"):
+                try:
+                    runtime_where.append("s.id=?"); runtime_params.append(int(query["id"]))
+                except ValueError:
+                    self._send_payload(400, self._json_error("id must be an integer"), api=True)
+                    return
+            if query.get("before"):
+                try:
+                    runtime_where.append("s.id<?"); runtime_params.append(int(query["before"]))
+                except ValueError:
+                    pass
+            runtime_sql = " WHERE " + " AND ".join(runtime_where) if runtime_where else ""
+            runtime_sessions = [dict(row) for row in connection.execute("SELECT s.id,s.agent,s.started_at,s.last_seen_at,s.cwd,s.project_name,(SELECT COUNT(*) FROM calls x WHERE x.runtime_session_id=s.id OR (x.runtime_session_id IS NULL AND x.session_id=s.id)) AS call_count FROM runtime_sessions s" + runtime_sql + " ORDER BY s.id DESC LIMIT ?", (*runtime_params, limit))]
+
+            client_where = []
+            client_params = []
+            if query.get("client_session_id"):
+                client_where.append("s.client_session_id=?"); client_params.append(query["client_session_id"])
+            if query.get("identity_status"):
+                client_where.append("s.identity_status=?"); client_params.append(query["identity_status"])
+            if query.get("before"):
+                try:
+                    client_where.append("s.id<?"); client_params.append(int(query["before"]))
+                except ValueError:
+                    pass
+            client_sql = " WHERE " + " AND ".join(client_where) if client_where else ""
+            client_sessions = [dict(row) for row in connection.execute("SELECT s.id,s.client_session_id,s.identity_status,s.identity_source,s.first_seen_at,s.last_seen_at,(SELECT COUNT(*) FROM calls x WHERE x.client_session_row_id=s.id) AS call_count FROM client_sessions s" + client_sql + " ORDER BY s.id DESC LIMIT ?", (*client_params, limit))]
+        payload = {"calls": calls, "runtime_sessions": runtime_sessions, "client_sessions": client_sessions}
+        if route == "/api/overview":
             payload["security_warnings"] = list(self.security_warnings)
-        if self.path == "/api/calls": payload = {"calls": calls}
-        if self.path == "/api/sessions": payload = {"sessions": sessions}
+        if route == "/api/calls": payload = {"calls": calls}
+        if route == "/api/runtime-sessions": payload = {"runtime_sessions": runtime_sessions}
+        if route == "/api/client-sessions": payload = {"client_sessions": client_sessions}
         raw = json.dumps(payload, ensure_ascii=False).encode(); self._send_payload(200, raw, api=True)
 
     def do_PUT(self):
@@ -838,6 +993,9 @@ def _apply_runtime_settings(settings):
     Handler.upstream = settings.upstream
     Handler.security_warnings = settings.upstream_warnings
     Handler.capture_max_body = settings.max_body
+    Handler.identity_mode = settings.client_identity_mode
+    Handler.capture_budget_limit = settings.capture_budget
+    Handler.capture_budget = CaptureBudget(settings.capture_budget)
     Handler.db_timeout = settings.db_timeout
     Handler.upstream_timeout = settings.upstream_timeout
     Handler.sidecar_timeout = settings.sidecar_timeout
@@ -987,6 +1145,8 @@ def _add_config_options(parser, suppress=False):
     parser.add_argument("--listen", default=default)
     parser.add_argument("--upstream", default=default)
     parser.add_argument("--max-body", dest="max_body", type=int, default=default)
+    parser.add_argument("--client-identity-mode", dest="client_identity_mode", choices=("default", "strict"), default=default)
+    parser.add_argument("--capture-budget", dest="capture_budget", type=int, default=default)
     parser.add_argument("--retention-days", dest="retention_days", type=int, default=default)
     parser.add_argument("--db-timeout", dest="db_timeout", type=float, default=default)
     parser.add_argument("--upstream-timeout", dest="upstream_timeout", type=float, default=default)
@@ -1028,15 +1188,17 @@ def main(argv=None):
     if args.cmd == "purge": print("purged", purge(path, settings.retention_days, settings.db_timeout), f"calls older than {settings.retention_days} days"); return
     if args.cmd == "list":
         with closing(db(path, settings.db_timeout)) as connection:
-            rows = connection.execute("SELECT id,created_at,endpoint,model,status,status_code,duration_ms,input_bytes,output_bytes FROM calls ORDER BY id DESC LIMIT ?", (settings.cli_call_limit,)).fetchall()
+            rows = connection.execute("SELECT c.id,c.runtime_session_id,c.client_session_row_id,cs.client_session_id,c.thread_id,c.request_correlation_id,c.created_at,c.endpoint,c.model,c.status,c.status_code,c.duration_ms,c.input_bytes,c.output_bytes FROM calls c LEFT JOIN client_sessions cs ON cs.id=c.client_session_row_id ORDER BY c.id DESC LIMIT ?", (settings.cli_call_limit,)).fetchall()
         for row in rows:
-            print(f"{row['id']} {row['created_at']} {row['model'] or '-'} {row['status']} {row['status_code'] or '-'} {row['duration_ms'] or '-'}ms {row['input_bytes']}/{row['output_bytes']} {row['endpoint']}")
+            print(f"{row['id']} runtime={row['runtime_session_id'] or '-'} client={row['client_session_id'] or '-'} thread={row['thread_id'] or '-'} request={row['request_correlation_id'] or '-'} {row['created_at']} {row['model'] or '-'} {row['status']} {row['status_code'] or '-'} {row['duration_ms'] or '-'}ms {row['input_bytes']}/{row['output_bytes']} {row['endpoint']}")
         return
     if args.cmd == "show":
         with closing(db(path, settings.db_timeout)) as connection:
-            row = connection.execute("SELECT c.*,a.request_headers_json,a.response_headers_json,p.request_body,p.response_body,p.request_truncated,p.response_truncated FROM calls c JOIN attempts a ON a.call_id=c.id JOIN payloads p ON p.attempt_id=a.id WHERE c.id=?", (args.call_id,)).fetchone()
+            row = connection.execute("SELECT c.*,cs.client_session_id,a.request_headers_json,a.response_headers_json,p.request_body,p.response_body,p.request_truncated,p.response_truncated,p.capture_degraded FROM calls c LEFT JOIN client_sessions cs ON cs.id=c.client_session_row_id JOIN attempts a ON a.call_id=c.id JOIN payloads p ON p.attempt_id=a.id WHERE c.id=?", (args.call_id,)).fetchone()
         if not row: raise SystemExit("call not found")
-        print("[HEADERS]\n" + json.dumps({"request": json.loads(row["request_headers_json"] or "{}"), "response": json.loads(row["response_headers_json"] or "{}")}, indent=2)); print(json.dumps({key: row[key] for key in ("id", "session_id", "created_at", "completed_at", "endpoint", "model", "stream", "status", "status_code", "first_byte_at", "duration_ms", "input_bytes", "output_bytes", "error_type", "error_message")}, indent=2)); print(f"truncated: request={row['request_truncated'] or 0} response={row['response_truncated'] or 0}"); print("\n[REQUEST]\n" + (row["request_body"] or b"").decode(errors="replace")); print("\n[RESPONSE]\n" + (row["response_body"] or b"").decode(errors="replace")); return
+        safe_request_headers = headers(json.loads(row["request_headers_json"] or "{}"))
+        safe_response_headers = headers(json.loads(row["response_headers_json"] or "{}"))
+        print("[HEADERS]\n" + json.dumps({"request": safe_request_headers, "response": safe_response_headers}, indent=2)); print(json.dumps({key: row[key] for key in ("id", "runtime_session_id", "client_session_id", "client_session_row_id", "thread_id", "request_correlation_id", "created_at", "completed_at", "endpoint", "model", "stream", "status", "status_code", "first_byte_at", "duration_ms", "input_bytes", "output_bytes", "error_type", "error_message")}, indent=2)); print(f"capture: request_truncated={row['request_truncated'] or 0} response_truncated={row['response_truncated'] or 0} capture_degraded={row['capture_degraded'] or 0}"); print("\n[REQUEST]\n" + (row["request_body"] or b"").decode(errors="replace")); print("\n[RESPONSE]\n" + (row["response_body"] or b"").decode(errors="replace")); return
     sidecar_env = {"PI_AI_SIDECAR_TOKEN": settings.sidecar_token} if settings.sidecar_token else None
     manager = SidecarProcess(url=settings.sidecar_url, command=settings.sidecar_command, timeout=settings.sidecar_start_timeout, stop_timeout=settings.sidecar_stop_timeout, env=sidecar_env)
     configured_sidecar = None
@@ -1047,9 +1209,9 @@ def main(argv=None):
         except SidecarStartupError as exc:
             print("pi-ai sidecar unavailable:", exc, file=sys.stderr)
         Handler.clients = []
-        Handler.db_path = path; Handler.upstream = settings.upstream; Handler.security_warnings = settings.upstream_warnings; Handler.sidecar_url = configured_sidecar; Handler.sidecar_token = settings.sidecar_token; Handler.session_id = None
+        Handler.db_path = path; Handler.upstream = settings.upstream; Handler.security_warnings = settings.upstream_warnings; Handler.sidecar_url = configured_sidecar; Handler.sidecar_token = settings.sidecar_token; Handler.runtime_session_id = None; Handler.session_id = None
         Handler.sidecar_managed = manager.process is not None
-        Handler.db_timeout = settings.db_timeout; Handler.capture_max_body = settings.max_body; Handler.upstream_timeout = settings.upstream_timeout; Handler.sidecar_timeout = settings.sidecar_timeout; Handler.sse_keepalive = settings.sse_keepalive; Handler.api_call_limit = settings.api_call_limit; Handler.ui_path = settings.ui_path
+        Handler.db_timeout = settings.db_timeout; Handler.capture_max_body = settings.max_body; Handler.capture_budget_limit = settings.capture_budget; Handler.capture_budget = CaptureBudget(settings.capture_budget); Handler.identity_mode = settings.client_identity_mode; Handler.upstream_timeout = settings.upstream_timeout; Handler.sidecar_timeout = settings.sidecar_timeout; Handler.sse_keepalive = settings.sse_keepalive; Handler.api_call_limit = settings.api_call_limit; Handler.ui_path = settings.ui_path
         Handler.config_path = settings.config_path
         Handler.config_settings = settings_values(settings)
         Handler.config_sources = resolve_sources(args)
@@ -1059,9 +1221,13 @@ def main(argv=None):
         try:
             server = GatewayHTTPServer((host, port), Handler)
             Handler.gateway_server = server
+            server.sidecar_process = manager.process
+            server.sidecar_manager = manager
             with closing(db(path, settings.db_timeout)) as connection:
-                cursor = connection.execute("INSERT INTO sessions(agent,started_at,last_seen_at,cwd,metadata_json) VALUES(?,?,?,?,?)", ("codex", iso(), iso(), os.getcwd(), "{}"))
-                Handler.session_id = cursor.lastrowid
+                cursor = connection.execute("INSERT INTO runtime_sessions(agent,started_at,last_seen_at,cwd,metadata_json) VALUES(?,?,?,?,?)", ("codex", iso(), iso(), os.getcwd(), "{}"))
+                Handler.runtime_session_id = cursor.lastrowid
+                Handler.session_id = Handler.runtime_session_id
+                connection.execute("INSERT OR IGNORE INTO sessions(id,agent,started_at,last_seen_at,cwd,metadata_json) VALUES(?,?,?,?,?,?)", (Handler.runtime_session_id, "codex", iso(), iso(), os.getcwd(), "{}"))
                 connection.commit()
             start_purge_worker(server, path, settings.retention_days, settings.purge_interval, settings.db_timeout)
             print(f"gateway listening on http://{settings.listen}, upstream {settings.upstream}", flush=True)

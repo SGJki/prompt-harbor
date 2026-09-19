@@ -12,11 +12,11 @@ function sessionLabel(s) {
 }
 
 export function filterCalls(state) {
-  const { status, session, q } = state.filters;
+  const { status, session, sessionScope = 'runtime', q } = state.filters;
   const needle = q.trim().toLowerCase();
   return state.calls.filter(c => {
     if (status !== 'all' && c.status !== status) return false;
-    if (session !== 'all' && String(c.session_id) !== session) return false;
+    if (session !== 'all' && String(sessionScope === 'client' ? c.client_session_id : c.runtime_session_id) !== session) return false;
     if (needle && !`${c.model ?? ''} ${c.endpoint ?? ''}`.toLowerCase().includes(needle)) return false;
     return true;
   });
@@ -27,7 +27,7 @@ export function callTable(calls, selectedId) {
   const rows = calls.map(c => `<tr class="call-row ${c.id === selectedId ? 'selected' : ''}" data-call-id="${esc(c.id)}" tabindex="0" role="button" aria-label="Open call ${esc(c.id)}">
 <td>${esc(c.id)}</td>
 <td title="${esc(c.created_at)}">${esc(fmtDateTime(c.created_at))}</td>
-<td>${esc(c.session_id)}</td>
+<td>runtime=${esc(c.runtime_session_id ?? c.session_id)}<br>client=${esc(c.client_session_id ?? '—')}</td>
 <td>${esc(c.endpoint)}</td>
 <td>${esc(c.model)}</td>
 <td>${statusPill(c)}</td>
@@ -38,7 +38,8 @@ export function callTable(calls, selectedId) {
 
 export function overviewView(state) {
   const calls = state.calls;
-  const sessions = state.sessions;
+  const runtimeSessions = state.runtimeSessions;
+  const clientSessions = state.clientSessions;
   const ok = calls.filter(c => c.status_code >= 200 && c.status_code < 400).length;
   const rate = calls.length ? Math.round((ok / calls.length) * 100) : 0;
   const warnings = (state.securityWarnings || []).map(warning => `<div class="warn">${esc(warning)}</div>`).join('');
@@ -46,15 +47,16 @@ export function overviewView(state) {
 <div class="cards">
 <div class="card">Total calls<b>${calls.length}</b></div>
 <div class="card">Success rate<b>${rate}%</b></div>
-<div class="card">Sessions<b>${sessions.length}</b></div>
+<div class="card">Runtime sessions<b>${runtimeSessions.length}</b></div>
+<div class="card">Client sessions<b>${clientSessions.length}</b></div>
 </div>
 <div class="panel"><h3>Recent calls</h3>${callTable(calls.slice(0, 20), state.selectedCallId)}</div>`;
 }
 
 export function callsView(state) {
   const f = state.filters;
-  const sessionOpts = [`<option value="all" ${f.session === 'all' ? 'selected' : ''}>All sessions</option>`]
-    .concat(state.sessions.map(s => `<option value="${esc(s.id)}" ${String(s.id) === f.session ? 'selected' : ''}>${esc(sessionLabel(s))}</option>`))
+  const sessionOpts = [`<option value="all" ${f.session === 'all' ? 'selected' : ''}>All runtime sessions</option>`]
+    .concat(state.runtimeSessions.map(s => `<option value="${esc(s.id)}" ${String(s.id) === f.session ? 'selected' : ''}>${esc(sessionLabel(s))}</option>`))
     .join('');
   const statusOpts = ['all', 'succeeded', 'failed', 'running']
     .map(s => `<option value="${s}" ${f.status === s ? 'selected' : ''}>${s[0].toUpperCase() + s.slice(1)}</option>`)
@@ -72,9 +74,9 @@ export function callsView(state) {
 <div class="panel" id="call-detail"><p class="muted">Select a call to inspect its request and response.</p></div>`;
 }
 
-export function sessionsView(state) {
-  if (!state.sessions.length) return '<div class="panel"><h3>Sessions</h3><div class="empty">No sessions recorded yet.</div></div>';
-  const rows = state.sessions.map(s => `<tr>
+export function runtimeSessionsView(state) {
+  if (!state.runtimeSessions.length) return '<div class="panel"><h3>Runtime Sessions</h3><div class="empty">No runtime sessions recorded yet.</div></div>';
+  const rows = state.runtimeSessions.map(s => `<tr>
 <td>${esc(s.id)}</td>
 <td>${esc(s.agent)}</td>
 <td>${esc(s.project_name)}</td>
@@ -82,9 +84,15 @@ export function sessionsView(state) {
 <td title="${esc(s.started_at)}">${esc(fmtDateTime(s.started_at))}</td>
 <td title="${esc(s.last_seen_at)}">${esc(fmtDateTime(s.last_seen_at))}</td>
 <td>${esc(s.call_count ?? '—')}</td>
-<td><button class="link" data-session-calls="${esc(s.id)}">calls</button></td>
+<td><button class="link" data-session-calls="${esc(s.id)}" data-session-scope="runtime">calls</button></td>
 </tr>`);
-  return `<div class="panel"><h3>Sessions</h3><table><tr><th>ID</th><th>Agent</th><th>Project</th><th>Working directory</th><th>Started</th><th>Last seen</th><th>Calls</th><th></th></tr>${rows.join('')}</table></div>`;
+  return `<div class="panel"><h3>Runtime Sessions</h3><table><tr><th>ID</th><th>Agent</th><th>Project</th><th>Working directory</th><th>Started</th><th>Last seen</th><th>Calls</th><th></th></tr>${rows.join('')}</table></div>`;
+}
+
+export function clientSessionsView(state) {
+  if (!state.clientSessions.length) return '<div class="panel"><h3>Client Sessions</h3><div class="empty">No client sessions recorded yet.</div></div>';
+  const rows = state.clientSessions.map(s => `<tr><td>${esc(s.id)}</td><td>${esc(s.client_session_id)}</td><td>${esc(s.identity_status)}</td><td>${esc(s.identity_source)}</td><td>${esc(s.call_count ?? '—')}</td><td><button class="link" data-session-calls="${esc(s.client_session_id)}" data-session-scope="client">calls</button></td></tr>`);
+  return `<div class="panel"><h3>Client Sessions</h3><table><tr><th>Row ID</th><th>Client Session ID</th><th>Status</th><th>Source</th><th>Calls</th><th></th></tr>${rows.join('')}</table></div>`;
 }
 
 function prettySSE(text) {
@@ -116,8 +124,8 @@ export function detailView(detail) {
   const error = c.error_message ? `<h4>Error</h4><pre>${esc(c.error_type)}: ${esc(c.error_message)}</pre>` : '';
   const requestTruncated = c.request_truncated ? 'yes' : 'no';
   const responseTruncated = c.response_truncated ? 'yes' : 'no';
-  const truncated = c.request_truncated || c.response_truncated
-    ? `<p class="warn">Body truncated (request=${requestTruncated}, response=${responseTruncated})</p>`
+  const truncated = c.request_truncated || c.response_truncated || c.capture_degraded
+    ? `<p class="warn">Capture (request_truncated=${requestTruncated}, response_truncated=${responseTruncated}, capture_degraded=${c.capture_degraded ? 'yes' : 'no'})</p>`
     : '';
   return `<h3>Call ${esc(c.id)}</h3>
 <p><b>${esc(c.endpoint)}</b> · ${statusPill(c)} (${esc(c.status_code ?? '—')}) · ${esc(fmtDuration(c.duration_ms))} · in ${esc(fmtBytes(c.input_bytes))} / out ${esc(fmtBytes(c.output_bytes))}${c.stream ? ' · stream' : ''}</p>

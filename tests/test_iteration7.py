@@ -41,3 +41,19 @@ def test_runtime_config_update_redacts_secret_and_reports_restart_fields(tmp_pat
             Handler.capture_max_body, Handler.db_timeout, Handler.upstream_timeout,
             Handler.sidecar_timeout, Handler.sse_keepalive, Handler.api_call_limit, Handler.ui_path,
         ) = previous
+
+
+def test_runtime_config_update_applies_identity_policy_and_capture_budget(tmp_path):
+    previous = Handler.config_path, Handler.config_settings, Handler.config_sources, Handler.gateway_server, Handler.identity_mode, Handler.capture_budget_limit, Handler.capture_budget
+    try:
+        Handler.config_path = str(tmp_path / "prompt-harbor.ini")
+        Handler.config_settings = settings_values(Settings())
+        Handler.config_sources = {field: "default" for field in Handler.config_settings}
+        Handler.gateway_server = None
+        result = update_runtime_config({"client_identity_mode": "strict", "capture_budget": 17})
+        assert result["restart_required"] == []
+        assert Handler.identity_mode == "strict"
+        assert Handler.capture_budget_limit == 17
+        assert Handler.capture_budget.limit == 17
+    finally:
+        Handler.config_path, Handler.config_settings, Handler.config_sources, Handler.gateway_server, Handler.identity_mode, Handler.capture_budget_limit, Handler.capture_budget = previous

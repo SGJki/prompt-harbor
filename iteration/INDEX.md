@@ -18,6 +18,8 @@
 | iteration-12 | `closed` | 修复最近 6 个 commit 的 CR 问题，并完成全仓 OCR 增强审查、修复与 152 项回归验收。 | [PROGRESS](./iteration-12/PROGRESS.md) · [BLOCKED](./iteration-12/BLOCKED.md) |
 | iteration-13 | `closed` | 同步 Iteration Tracking 规则与现有索引/记录工作方式。 | [PROGRESS](./iteration-13/PROGRESS.md) · [BLOCKED](./iteration-13/BLOCKED.md) |
 | iteration-14 | `closed` | 领域与架构访谈：确认会话分层、client identity、转发优先持久化、并发 schema、payload 快照和 sidecar ownership。 | [PROGRESS](./iteration-14/PROGRESS.md) · [BLOCKED](./iteration-14/BLOCKED.md) |
+| iteration-15 | `closed` | 完成会话分层、并发审计持久化、显式 API/UI/CLI、bounded response snapshot、payload 安全与 sidecar ownership/reprobe；176 项 pytest 和浏览器回归通过。 | [PROGRESS](./iteration-15/PROGRESS.md) · [BLOCKED](./iteration-15/BLOCKED.md) |
+| iteration-16 | `closed` | 修复旧 schema 重建、sidecar crash 终态覆盖和 identity/capture budget 热更新；179 项 pytest 与浏览器回归通过。 | [PROGRESS](./iteration-16/PROGRESS.md) · [BLOCKED](./iteration-16/BLOCKED.md) |
 
 ## Maintenance
 

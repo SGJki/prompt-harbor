@@ -236,6 +236,26 @@ def test_pi_messages_sidecar_token_and_get_models(tmp_path):
         upstream.shutdown()
 
 
+def test_invalid_messages_body_is_not_persisted_raw(tmp_path):
+    PiSidecar.mode = "done"
+    upstream = ThreadingHTTPServer(("127.0.0.1", 0), PiSidecar)
+    threading.Thread(target=upstream.serve_forever, daemon=True).start()
+    process, port, database = start_gateway(tmp_path, f"http://127.0.0.1:{upstream.server_port}")
+    try:
+        raw = b'{"model":"fixture/model","context": [INVALID], "secret":"RAW_SECRET"}'
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        connection.request("POST", "/messages", raw)
+        response = connection.getresponse(); response.read(); connection.close()
+        assert response.status == 400
+        row = wait_row(database, "select status from calls")
+        assert row == ("failed",)
+        with sqlite3.connect(database) as connection:
+            stored = connection.execute("select request_body from payloads").fetchone()[0]
+        assert b"RAW_SECRET" not in (stored or b"")
+    finally:
+        process.terminate(); process.wait(timeout=3); upstream.shutdown()
+
+
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
 def test_managed_fixture_sidecar(tmp_path):
     process, port, database = start_gateway(
