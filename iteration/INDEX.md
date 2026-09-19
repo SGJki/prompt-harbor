@@ -17,6 +17,7 @@
 | iteration-11 | `closed` | 修复 CR blocking：托管 sidecar 地址保持、token 重启语义、startup secret 防止回写及回归测试。 | [PROGRESS](./iteration-11/PROGRESS.md) · [BLOCKED](./iteration-11/BLOCKED.md) |
 | iteration-12 | `closed` | 修复最近 6 个 commit 的 CR 问题，并完成全仓 OCR 增强审查、修复与 152 项回归验收。 | [PROGRESS](./iteration-12/PROGRESS.md) · [BLOCKED](./iteration-12/BLOCKED.md) |
 | iteration-13 | `closed` | 同步 Iteration Tracking 规则与现有索引/记录工作方式。 | [PROGRESS](./iteration-13/PROGRESS.md) · [BLOCKED](./iteration-13/BLOCKED.md) |
+| iteration-14 | `closed` | 领域与架构访谈：确认会话分层、client identity、转发优先持久化、并发 schema、payload 快照和 sidecar ownership。 | [PROGRESS](./iteration-14/PROGRESS.md) · [BLOCKED](./iteration-14/BLOCKED.md) |
 
 ## Maintenance
 
