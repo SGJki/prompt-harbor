@@ -19,8 +19,8 @@
 
 ### Iteration Tracking
 
-- Track project work under `iteration/iteration-{i}/`; do not treat root-level progress files as the active iteration record.
-- Before starting work, scan every `iteration/iteration-{i}/` directory and follow the highest-numbered iteration whose records do not contain `状态：closed`.
-- An iteration is active until both its `PROGRESS.md` and `BLOCKED.md` contain `状态：closed`; closed iterations remain as history and must not be deleted as cleanup.
-- When no unclosed iteration exists, create the next numbered iteration and put its progress and blocked records there.
-- Maintain `iteration/INDEX.md` as the quick status index; update its row when an iteration is created, becomes active, or is closed. Treat the per-iteration records as the detailed source of truth.
+- Record project work under `iteration/iteration-{i}/`; root-level progress files are not iteration records.
+- Use `iteration/INDEX.md` to locate the latest work, but first compare its highest-numbered row with the `iteration/iteration-{i}/` directories. Verify the candidate iteration's `PROGRESS.md` and `BLOCKED.md` before starting; if the index and records differ, the per-iteration records are authoritative and the index must be repaired.
+- Treat an iteration as active until both `PROGRESS.md` and `BLOCKED.md` explicitly contain `状态：closed`; a missing record or any other status means it is not closed. Continue the highest-numbered unclosed iteration.
+- If every existing iteration is closed, create the next number with both records before recording new work. Keep closed iterations as history; do not delete or reuse them.
+- Update the matching `iteration/INDEX.md` row whenever an iteration is created, becomes active, or closes, including a concise scope summary and links to both records.

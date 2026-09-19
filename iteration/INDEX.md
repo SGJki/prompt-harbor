@@ -16,6 +16,7 @@
 | iteration-10 | `closed` | 前端增量重构：Host 白名单与安全响应头、写接口 CSRF 防御、INI 保注释写回、配置来源锁定、CSS token 与可访问性。 | [PROGRESS](./iteration-10/PROGRESS.md) · [BLOCKED](./iteration-10/BLOCKED.md) |
 | iteration-11 | `closed` | 修复 CR blocking：托管 sidecar 地址保持、token 重启语义、startup secret 防止回写及回归测试。 | [PROGRESS](./iteration-11/PROGRESS.md) · [BLOCKED](./iteration-11/BLOCKED.md) |
 | iteration-12 | `closed` | 修复最近 6 个 commit 的 CR 问题，并完成全仓 OCR 增强审查、修复与 152 项回归验收。 | [PROGRESS](./iteration-12/PROGRESS.md) · [BLOCKED](./iteration-12/BLOCKED.md) |
+| iteration-13 | `closed` | 同步 Iteration Tracking 规则与现有索引/记录工作方式。 | [PROGRESS](./iteration-13/PROGRESS.md) · [BLOCKED](./iteration-13/BLOCKED.md) |
 
 ## Maintenance
 
