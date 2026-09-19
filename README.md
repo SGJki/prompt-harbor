@@ -28,6 +28,8 @@ database = gateway.db
 listen = 127.0.0.1:8787
 upstream = https://api.openai.com
 max_body = 10485760
+client_identity_mode = default
+capture_budget = 41943040
 retention_days = 2
 db_timeout = 30
 upstream_timeout = 600
@@ -45,7 +47,7 @@ purge_interval = 86400
 # token = local-token
 ```
 
-例如：`prompt-harbor --config ./prompt-harbor.ini start`。`max_body` 控制保存到 SQLite 的 request/response 前缀大小；认证 token 等敏感值不要提交到版本库。
+例如：`prompt-harbor --config ./prompt-harbor.ini start`。`max_body` 控制单个调用保存到 SQLite 的 request/response 前缀大小，`capture_budget` 控制并发 response snapshot 的进程级内存预算；预算耗尽时仍继续转发并标记 `capture_degraded`。`client_identity_mode` 可设为 `strict`，要求请求携带可解析的 client session identity。认证 token 等敏感值不要提交到版本库。
 
 ## pi-ai sidecar
 
@@ -85,7 +87,7 @@ body 默认最多保存 10 MiB，可用 `PROMPT_HARBOR_MAX_BODY` 调整；超过
 
 网关启动后，浏览器打开 `http://127.0.0.1:8787/` 即可使用内置审计台。前端位于 `ui/` 目录（`index.html` + `css/app.css` + `js/` 原生 ES 模块，无构建步骤），由网关托管目录内的 `.html/.css/.js` 静态资源；`PROMPT_HARBOR_UI` 仍可替换入口 HTML。页面提供与 CLI 相同的查询能力：
 
-- **Overview / Calls / Sessions** 切换视图，对应 `GET /api/overview`、`/api/calls`、`/api/sessions`；Sessions 显示每个会话的调用数，并可一键跳到该会话的调用列表；
+- **Overview / Calls / Runtime Sessions / Client Sessions** 切换视图，对应 `GET /api/overview`、`/api/calls`、`/api/runtime-sessions`、`/api/client-sessions`；两个会话视图显示各自的调用数，并可一键跳到对应筛选后的调用列表；旧的 `/api/sessions` 路径返回 404；
 - **Configuration** Tab 对应 `GET /api/config` / `PUT /api/config`，编辑 `prompt-harbor.ini` 支持的全部字段；可热更新字段会立即作用于网关，监听、数据库路径和 sidecar 启停相关字段会提示重启；sidecar token 只显示是否已配置，不会回显；
 - **Calls** 支持按状态（成功/失败/进行中）、按会话和 model/endpoint 关键字筛选；
 - 点击调用查看详情（`GET /api/calls/{id}`）：请求/响应 body（JSON 自动美化、SSE 逐条展开）、脱除认证字段的 headers、usage、错误与截断标记；

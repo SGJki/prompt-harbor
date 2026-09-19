@@ -20,6 +20,7 @@
 | iteration-14 | `closed` | 领域与架构访谈：确认会话分层、client identity、转发优先持久化、并发 schema、payload 快照和 sidecar ownership。 | [PROGRESS](./iteration-14/PROGRESS.md) · [BLOCKED](./iteration-14/BLOCKED.md) |
 | iteration-15 | `closed` | 完成会话分层、并发审计持久化、显式 API/UI/CLI、bounded response snapshot、payload 安全与 sidecar ownership/reprobe；176 项 pytest 和浏览器回归通过。 | [PROGRESS](./iteration-15/PROGRESS.md) · [BLOCKED](./iteration-15/BLOCKED.md) |
 | iteration-16 | `closed` | 修复旧 schema 重建、sidecar crash 终态覆盖和 identity/capture budget 热更新；179 项 pytest 与浏览器回归通过。 | [PROGRESS](./iteration-16/PROGRESS.md) · [BLOCKED](./iteration-16/BLOCKED.md) |
+| iteration-17 | `closed` | neat-freak 知识收尾：同步现役文档、核对规则与运行证据、审计工作区残留；179 项 pytest 与 1 项浏览器回归通过。 | [PROGRESS](./iteration-17/PROGRESS.md) · [BLOCKED](./iteration-17/BLOCKED.md) |
 
 ## Maintenance
 

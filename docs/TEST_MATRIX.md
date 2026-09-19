@@ -1,6 +1,6 @@
 # Test coverage matrix
 
-当前验收基线（2026-09-18）：`uv run pytest --collect-only -q` 为 **92 tests collected**；loopback-enabled 环境中的 `uv run pytest -q` 为 **92 passed, 0 skipped, 0 xfailed**。当前沙箱禁止 loopback，因此本次回归按项目规则在沙箱外完成；浏览器先执行 `npm ci`，再用 Playwright 默认 Chromium，或设置 `PROMPT_HARBOR_BROWSER` 指向已安装浏览器。
+当前验收基线（2026-09-19）：`uv run pytest --collect-only -q` 为 **179 tests collected**；loopback-enabled 环境中的 `uv run pytest -q` 为 **179 passed, 0 skipped, 0 xfailed**。当前沙箱禁止 loopback，因此本次回归按项目规则在沙箱外完成；本次沙箱外浏览器回归 `npm run test:browser` 为 **1 passed**，使用 Playwright 默认 Chromium，或设置 `PROMPT_HARBOR_BROWSER` 指向已安装浏览器。
 
 | SPEC / review area | Concrete tests |
 |---|---|

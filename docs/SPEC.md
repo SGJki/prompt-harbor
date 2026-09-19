@@ -4,7 +4,7 @@
 
 构建一个运行在本机的透明网关，观察 Codex CLI 发往 OpenAI API 的完整 request，以及 OpenAI 返回给 Codex 的完整 response。网关应尽量不改变 Codex 的行为，尤其是流式输出的时序和内容。
 
-## 2. 当前范围（2026-09-18）
+## 2. 当前范围（2026-09-19）
 
 ### 支持
 
@@ -23,7 +23,7 @@
 - 数据按时间保留 2 天；启动、显式 `purge` 和后台周期任务会清理过期数据
 - CLI：启动、查看调用列表、查看详情、清理数据
 - 可选 pi-ai sidecar：`/messages`、`/models`、`/health`
-- 内置无构建步骤的 Web 审计台：Overview、Calls、Sessions 和实时失效通知
+- 内置无构建步骤的 Web 审计台：Overview、Calls、Runtime Sessions、Client Sessions 和实时失效通知
 
 ### 不支持
 
@@ -80,7 +80,7 @@ SQLite 使用运行时/客户端会话和调用链表，关联由应用层维护
 - `payloads`：请求/最终响应 snapshot、content type，以及 `response_complete`、`response_truncated`、`capture_degraded` 等独立事实。
 - `usage`：输入/输出/总 token 及原始 usage JSON。
 
-body 直接存 SQLite。请求和响应默认各保存最多 10 MiB，超出部分只保留前缀并设置截断标记。
+body 直接存 SQLite。请求和响应默认各保存最多 10 MiB，超出部分只保留前缀并设置截断标记；进程级 `capture_budget` 限制并发 response snapshot 的内存占用，预算耗尽时转发继续但设置 `capture_degraded`。
 
 ## 6. CLI
 
@@ -124,7 +124,7 @@ uv run python -m prompt_harbor purge
 
 表之间不创建 SQLite 外键约束。`runtime_session_id`、`client_session_row_id`、`call_id`、`attempt_id` 只由业务代码维护；写入、查询和级联删除均由应用层负责。旧的 `/api/sessions` 资源不再提供。
 
-## 11. Session 期间的完整链路
+## 11. Runtime Session 与 Client Session 期间的完整链路
 
 ```mermaid
 sequenceDiagram
@@ -143,7 +143,7 @@ sequenceDiagram
     C-->>U: 展示模型输出
     U->>C: 继续操作
     C->>G: 下一次 request
-    G->>D: 同一 session 下创建新的 call
+    G->>D: 在 runtime session 中创建新的 call，并按 client session 分组
 ```
 
 ## 12. 数据表 ER 图（逻辑关联）
@@ -173,4 +173,4 @@ erDiagram
 
 实现代码位于 `prompt_harbor/`，按配置、数据库、代理、headers、usage、保留策略和 CLI 分模块组织；`prompt_harbor.py` 提供命令行入口。推荐运行方式为 `uv run python -m prompt_harbor ...`。
 
-请求和响应默认最多各保存 10 MiB，可通过 `PROMPT_HARBOR_MAX_BODY` 调整。超过限制时只保存前缀，并将对应的 `request_truncated` 或 `response_truncated` 设为 1；`response_complete` 表示上游传输是否完整，和 HTTP 状态码无关。
+请求和响应默认最多各保存 10 MiB，可通过 `PROMPT_HARBOR_MAX_BODY` 调整；进程级 response snapshot 预算可通过 `capture_budget` / `PROMPT_HARBOR_CAPTURE_BUDGET` 调整。超过单调用限制时只保存前缀并设置 `request_truncated` 或 `response_truncated`；预算不足时转发仍继续并设置 `capture_degraded`。`response_complete` 表示上游传输是否完整，和 HTTP 状态码、snapshot 是否降级无关。
