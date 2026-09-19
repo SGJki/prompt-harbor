@@ -15,7 +15,6 @@ export const state = {
   conn: 'poll',
   securityWarnings: [],
   config: { path: '', fields: {} },
-  configLoading: false,
   configSaving: false,
   configError: null,
   configNotice: null,
@@ -56,13 +55,15 @@ export async function load() {
   loadCtl = ctl;
   const seq = ++loadSeq;
   const tab = state.tab;
-  const endpoint = tab === 'sessions' ? '/api/sessions' : tab === 'config' ? '/api/config' : '/api/overview';
+  let endpoint = '/api/overview';
+  if (tab === 'sessions') endpoint = '/api/sessions';
+  else if (tab === 'config') endpoint = '/api/config';
   set({ loading: true, error: null });
   emit('status');
   try {
     const data = await getJSON(endpoint, { signal: ctl.signal });
     if (seq !== loadSeq) return;
-    if (tab === 'config') set({ config: data, configLoading: false, configError: null });
+    if (tab === 'config') set({ config: data, configError: null });
     else if (tab === 'sessions') set({ sessions: data.sessions || [] });
     else set({ calls: data.calls || [], sessions: data.sessions || [], securityWarnings: data.security_warnings || [] });
     set({ lastUpdated: new Date() });

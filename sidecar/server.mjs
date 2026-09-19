@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { createServer } from "node:http";
+import { isIP } from "node:net";
 import { pathToFileURL } from "node:url";
 
 const host = process.env.PI_AI_SIDECAR_HOST || "127.0.0.1";
@@ -8,6 +9,16 @@ const port = Number(process.env.PI_AI_SIDECAR_PORT || 0);
 const maxBody = Number(process.env.PI_AI_SIDECAR_MAX_BODY || 10 * 1024 * 1024);
 const localToken = process.env.PI_AI_SIDECAR_TOKEN;
 const fixture = process.env.PI_AI_SIDECAR_FIXTURE === "1";
+
+function isLoopbackHost(value) {
+  const normalized = value.toLowerCase().replace(/\.$/, "");
+  if (normalized === "localhost" || normalized === "::1") return true;
+  return isIP(normalized) === 4 && normalized.split(".")[0] === "127";
+}
+
+if (!isLoopbackHost(host)) throw new Error("PI_AI_SIDECAR_HOST must target loopback");
+if (!Number.isSafeInteger(port) || port < 0 || port > 65535) throw new Error("PI_AI_SIDECAR_PORT must be an integer from 0 to 65535");
+if (!Number.isSafeInteger(maxBody) || maxBody <= 0) throw new Error("PI_AI_SIDECAR_MAX_BODY must be a positive integer");
 
 let models;
 let loadFailure;
@@ -27,17 +38,23 @@ function readBody(req) {
   return new Promise((resolve, reject) => {
     const chunks = [];
     let size = 0;
+    let oversized = false;
     req.on("data", (chunk) => {
+      if (oversized) return;
       size += chunk.length;
       if (size > maxBody) {
+        oversized = true;
         reject(Object.assign(new Error("request body too large"), { statusCode: 413 }));
-        req.destroy();
         return;
       }
       chunks.push(chunk);
     });
-    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
-    req.on("error", reject);
+    req.on("end", () => {
+      if (!oversized) resolve(Buffer.concat(chunks).toString("utf8"));
+    });
+    req.on("error", (error) => {
+      if (!oversized) reject(error);
+    });
   });
 }
 
@@ -215,6 +232,7 @@ async function streamPi(res, req, body) {
 
 const server = createServer(async (req, res) => {
   if (!authorized(req)) {
+    req.resume();
     json(res, 401, { error: { code: "unauthorized", message: "invalid sidecar token" } });
     return;
   }
@@ -233,6 +251,7 @@ const server = createServer(async (req, res) => {
     return;
   }
   if (req.method !== "POST" || req.url !== "/messages") {
+    req.resume();
     json(res, 404, { error: { code: "not_found", message: "not found" } });
     return;
   }
@@ -243,8 +262,10 @@ const server = createServer(async (req, res) => {
     json(res, error.statusCode || 400, { error: { code: "invalid_request", message: error.message } });
     return;
   }
-  if (!body || typeof body !== "object" || typeof body.model !== "string" || !body.context) {
-    json(res, 400, { error: { code: "invalid_request", message: "model and context are required" } });
+  const contextValid = body?.context && typeof body.context === "object" && !Array.isArray(body.context);
+  const optionsValid = body?.options === undefined || (body.options !== null && typeof body.options === "object" && !Array.isArray(body.options));
+  if (!body || typeof body !== "object" || Array.isArray(body) || typeof body.model !== "string" || !contextValid || !optionsValid) {
+    json(res, 400, { error: { code: "invalid_request", message: "model, context, and options must have valid types" } });
     return;
   }
   res.setHeader("x-pi-model", body.model);

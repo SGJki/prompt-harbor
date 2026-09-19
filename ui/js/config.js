@@ -14,7 +14,9 @@ function configField(name, field) {
   const value = field.secret ? '' : field.value ?? '';
   const integer = ['max_body', 'retention_days', 'api_call_limit', 'cli_call_limit'].includes(name);
   const decimal = ['db_timeout', 'upstream_timeout', 'sidecar_timeout', 'sidecar_start_timeout', 'sidecar_stop_timeout', 'sse_keepalive', 'purge_interval'].includes(name);
-  const type = field.secret ? 'password' : integer || decimal ? 'number' : 'text';
+  let type = 'text';
+  if (field.secret) type = 'password';
+  else if (integer || decimal) type = 'number';
   const step = decimal ? ' step="any"' : '';
   const locked = field.source === 'cli' || field.source === 'env';
   const source = `<span class="config-badge source-${esc(field.source || 'default')}">${esc(field.source || 'default')}</span>`;

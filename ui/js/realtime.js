@@ -5,7 +5,6 @@ const POLL_INTERVAL_MS = 15000;
 
 let es = null;
 let esLive = false;
-let pollTimer = 0;
 let invalidateTimer = 0;
 
 function debouncedRefresh() {
@@ -29,7 +28,7 @@ function connect() {
 
 export function startRealtime() {
   connect();
-  pollTimer = setInterval(() => {
+  setInterval(() => {
     if (document.hidden || esLive) return;
     load();
   }, POLL_INTERVAL_MS);

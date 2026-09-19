@@ -6,7 +6,9 @@ def purge(path, connect, retention_days=DEFAULT_RETENTION_DAYS, timeout=DEFAULT_
         connection = connect(path, timeout)
     except TypeError:
         connection = connect(path)
-    count = purge_calls(connection, retention_days)
-    connection.commit()
-    connection.close()
-    return count
+    try:
+        count = purge_calls(connection, retention_days)
+        connection.commit()
+        return count
+    finally:
+        connection.close()

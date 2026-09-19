@@ -2,6 +2,7 @@
 """PromptHarbor gateway and command-line entrypoint."""
 
 import argparse
+import html
 import json
 import os
 import sqlite3
@@ -9,10 +10,11 @@ import stat
 import sys
 import threading
 import time
+from contextlib import closing
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.error import HTTPError
-from urllib.parse import unquote, urlparse
+from urllib.parse import unquote, urlparse, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from .config import (
@@ -41,11 +43,12 @@ from .pi_messages import PiMessagesState, normalize_usage, split_model_id
 from .sidecar import SidecarProcess, SidecarStartupError
 
 CONTENT_TYPES = {".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8", ".js": "text/javascript; charset=utf-8"}
-HOP_BY_HOP = {"transfer-encoding", "connection", "content-length"}
+HOP_BY_HOP = {
+    "connection", "content-length", "keep-alive", "proxy-authenticate",
+    "proxy-authorization", "proxy-connection", "te", "trailer",
+    "transfer-encoding", "upgrade",
+}
 REDIRECT_STATUSES = {301, 302, 303, 307, 308}
-DEFAULT_DB = DEFAULT_DB
-DEFAULT_LISTEN = DEFAULT_LISTEN
-DEFAULT_UPSTREAM = DEFAULT_UPSTREAM
 CONFIG_LOCK = threading.RLock()
 
 
@@ -73,7 +76,7 @@ def open_url(request, timeout):
 
 
 def iso(ts=None):
-    return datetime.fromtimestamp(ts, timezone.utc).isoformat() if ts else datetime.now(timezone.utc).isoformat()
+    return datetime.fromtimestamp(ts, timezone.utc).isoformat() if ts is not None else datetime.now(timezone.utc).isoformat()
 
 
 def db(path, timeout=DEFAULT_DB_TIMEOUT):
@@ -116,10 +119,9 @@ def schema(connection):
 
 
 def init(path, timeout=DEFAULT_DB_TIMEOUT):
-    connection = db(path, timeout)
-    schema(connection)
-    connection.commit()
-    connection.close()
+    with closing(db(path, timeout)) as connection:
+        schema(connection)
+        connection.commit()
     # Audit payloads can contain sensitive prompts; keep the local database
     # private even when the process inherits a permissive umask.
     try:
@@ -133,6 +135,13 @@ def init(path, timeout=DEFAULT_DB_TIMEOUT):
 
 def headers(header_map):
     return sanitize(header_map)
+
+
+def hop_by_hop_headers(header_map):
+    excluded = set(HOP_BY_HOP)
+    for value in header_map.get_all("Connection", []):
+        excluded.update(token.strip().lower() for token in value.split(",") if token.strip())
+    return excluded
 
 
 def extract_usage(data):
@@ -190,7 +199,7 @@ class Handler(BaseHTTPRequestHandler):
     gateway_server = None
 
     @staticmethod
-    def _json_error(status, message):
+    def _json_error(message):
         raw = json.dumps({"error": {"type": "invalid_request", "message": message}}, ensure_ascii=False).encode()
         return raw
 
@@ -210,33 +219,60 @@ class Handler(BaseHTTPRequestHandler):
 
     def _reject_untrusted_host(self):
         """Reject browser requests whose Host does not identify this loopback service."""
-        host = self.headers.get("Host")
-        if not host:
-            return False
+        values = self.headers.get_all("Host", [])
+        trusted = False
         try:
-            from urllib.parse import urlsplit
-            hostname = urlsplit("//" + host).hostname
-        except ValueError:
-            hostname = None
-        if hostname and hostname.lower().rstrip(".") in {"127.0.0.1", "localhost", "::1"}:
+            if len(values) == 1:
+                parsed = urlsplit("//" + values[0])
+                hostname = parsed.hostname.lower().rstrip(".") if parsed.hostname else ""
+                parsed.port  # Validate the optional port before trusting the authority.
+                trusted = (
+                    not parsed.username
+                    and not parsed.password
+                    and not parsed.path
+                    and not parsed.query
+                    and not parsed.fragment
+                    and hostname in {"127.0.0.1", "localhost", "::1"}
+                )
+        except (AttributeError, ValueError):
+            pass
+        if trusted:
             return False
-        self._send_payload(403, self._json_error(403, "untrusted Host header"), api=self.path.startswith("/api/"))
+        path = getattr(self, "path", "")
+        self._send_payload(403, self._json_error("untrusted Host header"), api=path.startswith("/api/"))
+        self.close_connection = True
         return True
 
     def do_POST(self):
         if self._reject_untrusted_host():
             return
-        if self.path == "/messages":
-            self._handle_pi_messages()
-        else:
-            self._handle_openai()
-
-    def _read_body(self):
         try:
-            length = int(self.headers.get("Content-Length", "0") or 0)
-        except ValueError:
-            length = 0
-        return self.rfile.read(max(0, length))
+            body = self._read_body()
+        except ValueError as exc:
+            self._send_json_error(400, str(exc))
+            self.close_connection = True
+            return
+        if self.path == "/messages":
+            self._handle_pi_messages(body)
+        else:
+            self._handle_openai(body)
+
+    def _read_body(self, max_length=None):
+        if self.headers.get_all("Transfer-Encoding", []):
+            raise ValueError("Transfer-Encoding is not supported")
+        lengths = self.headers.get_all("Content-Length", [])
+        if len(lengths) > 1:
+            raise ValueError("multiple Content-Length headers are not supported")
+        raw_length = lengths[0].strip() if lengths else "0"
+        if not raw_length.isdigit():
+            raise ValueError("invalid Content-Length header")
+        length = int(raw_length)
+        if max_length is not None and length > max_length:
+            raise ValueError("request body is too large")
+        body = self.rfile.read(length)
+        if len(body) != length:
+            raise ValueError("incomplete request body")
+        return body
 
     def _forget_authorization(self):
         """Remove client credentials from the request object after capture."""
@@ -275,24 +311,23 @@ class Handler(BaseHTTPRequestHandler):
         created = iso(started)
         limit = body_limit(self.capture_max_body)
         request_size = input_bytes if input_bytes is not None else len(body)
-        connection = db(self.db_path, self.db_timeout)
-        connection.execute("UPDATE sessions SET last_seen_at=? WHERE id=?", (created, self.session_id))
-        cursor = connection.execute(
-            "INSERT INTO calls(session_id,created_at,provider,api_family,endpoint,model,stream,status,input_bytes) VALUES(?,?,?,?,?,?,?,?,?)",
-            (self.session_id, created, provider, api_family, self.path, model, int(bool(stream)), "running", request_size),
-        )
-        call_id = cursor.lastrowid
-        cursor = connection.execute(
-            "INSERT INTO attempts(call_id,attempt_no,started_at,upstream_url,status,request_headers_json,input_bytes) VALUES(?,?,?,?,?,?,?)",
-            (call_id, 1, created, target, "running", json.dumps(headers(self.headers), ensure_ascii=False), request_size),
-        )
-        attempt_id = cursor.lastrowid
-        connection.execute(
-            "INSERT INTO payloads(attempt_id,request_body,request_content_type,request_truncated,created_at,updated_at) VALUES(?,?,?,?,?,?)",
-            (attempt_id, body[:limit], self.headers.get("Content-Type"), int(request_size > limit), created, created),
-        )
-        connection.commit()
-        connection.close()
+        with closing(db(self.db_path, self.db_timeout)) as connection:
+            connection.execute("UPDATE sessions SET last_seen_at=? WHERE id=?", (created, self.session_id))
+            cursor = connection.execute(
+                "INSERT INTO calls(session_id,created_at,provider,api_family,endpoint,model,stream,status,input_bytes) VALUES(?,?,?,?,?,?,?,?,?)",
+                (self.session_id, created, provider, api_family, self.path, model, int(bool(stream)), "running", request_size),
+            )
+            call_id = cursor.lastrowid
+            cursor = connection.execute(
+                "INSERT INTO attempts(call_id,attempt_no,started_at,upstream_url,status,request_headers_json,input_bytes) VALUES(?,?,?,?,?,?,?)",
+                (call_id, 1, created, target, "running", json.dumps(headers(self.headers), ensure_ascii=False), request_size),
+            )
+            attempt_id = cursor.lastrowid
+            connection.execute(
+                "INSERT INTO payloads(attempt_id,request_body,request_content_type,request_truncated,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+                (attempt_id, body[:limit], self.headers.get("Content-Type"), int(request_size > limit), created, created),
+            )
+            connection.commit()
         return {
             "started": started, "call_id": call_id, "attempt_id": attempt_id, "limit": limit,
             "out": bytearray(), "total_out": 0, "response_truncated": False, "first": None,
@@ -305,24 +340,23 @@ class Handler(BaseHTTPRequestHandler):
         started = time.time()
         created = iso(started)
         request_size = len(body) if input_bytes is None else input_bytes
-        connection = db(self.db_path, self.db_timeout)
-        connection.execute("UPDATE sessions SET last_seen_at=? WHERE id=?", (created, self.session_id))
-        cursor = connection.execute(
-            "INSERT INTO calls(session_id,created_at,provider,api_family,endpoint,model,stream,status,input_bytes,error_type,error_message) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-            (self.session_id, created, provider, api_family, self.path, model, int(bool(stream)), "failed", request_size, "configuration_error", str(error)),
-        )
-        call_id = cursor.lastrowid
-        cursor = connection.execute(
-            "INSERT INTO attempts(call_id,attempt_no,started_at,completed_at,upstream_url,status,status_code,request_headers_json,input_bytes,error_type,error_message) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-            (call_id, 1, created, created, target, "failed", 400, json.dumps(headers(self.headers), ensure_ascii=False), request_size, "configuration_error", str(error)),
-        )
-        attempt_id = cursor.lastrowid
-        connection.execute(
-            "INSERT INTO payloads(attempt_id,request_body,request_content_type,response_complete,request_truncated,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
-            (attempt_id, body[:DEFAULT_MAX_BODY], self.headers.get("Content-Type"), 1, 0, created, created),
-        )
-        connection.commit()
-        connection.close()
+        with closing(db(self.db_path, self.db_timeout)) as connection:
+            connection.execute("UPDATE sessions SET last_seen_at=? WHERE id=?", (created, self.session_id))
+            cursor = connection.execute(
+                "INSERT INTO calls(session_id,created_at,provider,api_family,endpoint,model,stream,status,input_bytes,error_type,error_message) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (self.session_id, created, provider, api_family, self.path, model, int(bool(stream)), "failed", request_size, "configuration_error", str(error)),
+            )
+            call_id = cursor.lastrowid
+            cursor = connection.execute(
+                "INSERT INTO attempts(call_id,attempt_no,started_at,completed_at,upstream_url,status,status_code,request_headers_json,input_bytes,error_type,error_message) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (call_id, 1, created, created, target, "failed", 400, json.dumps(headers(self.headers), ensure_ascii=False), request_size, "configuration_error", str(error)),
+            )
+            attempt_id = cursor.lastrowid
+            connection.execute(
+                "INSERT INTO payloads(attempt_id,request_body,request_content_type,response_complete,request_truncated,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
+                (attempt_id, body[:DEFAULT_MAX_BODY], self.headers.get("Content-Type"), 1, 0, created, created),
+            )
+            connection.commit()
         return {
             "started": started, "call_id": call_id, "attempt_id": attempt_id, "limit": DEFAULT_MAX_BODY,
             "out": bytearray(), "total_out": 0, "response_truncated": False, "first": None,
@@ -331,7 +365,7 @@ class Handler(BaseHTTPRequestHandler):
         }
 
     def _send_json_error(self, status, message):
-        raw = self._json_error(status, message)
+        raw = self._json_error(message)
         self._send_payload(status, raw, api=self.path.startswith("/api/"))
         self.wfile.flush()
 
@@ -347,6 +381,15 @@ class Handler(BaseHTTPRequestHandler):
         if record["total_out"] > record["limit"]:
             record["response_truncated"] = True
 
+    @staticmethod
+    def _response_content_length(header_map):
+        values = header_map.get_all("Content-Length", [])
+        if not values:
+            return None
+        if len(values) != 1 or not values[0].strip().isdigit():
+            raise ValueError("invalid upstream Content-Length header")
+        return int(values[0].strip())
+
     def _finish_attempt(self, record, usage=None, raw_usage=None):
         done = time.time()
         values = (
@@ -354,16 +397,15 @@ class Handler(BaseHTTPRequestHandler):
             iso(record["first"]) if record["first"] else None, int((done - record["started"]) * 1000),
             record["total_out"], record["error_type"], record["error_message"], record["attempt_id"],
         )
-        connection = db(self.db_path, self.db_timeout)
-        connection.execute("UPDATE attempts SET completed_at=?,status=?,status_code=?,response_headers_json=?,first_byte_at=?,duration_ms=?,output_bytes=?,error_type=?,error_message=? WHERE id=?", values)
-        connection.execute("UPDATE calls SET completed_at=?,status=?,status_code=?,first_byte_at=?,duration_ms=?,output_bytes=?,error_type=?,error_message=? WHERE id=?", values[:1] + values[1:2] + values[2:3] + values[4:9] + (record["call_id"],))
-        connection.execute("UPDATE payloads SET response_body=?,response_content_type=?,response_complete=?,response_truncated=?,updated_at=? WHERE attempt_id=?", (bytes(record["out"]), record["response_content_type"], int(record["response_complete"]), int(record["response_truncated"]), iso(done), record["attempt_id"]))
-        normalized = normalize_usage(usage)
-        if normalized:
-            raw_value = raw_usage if isinstance(raw_usage, dict) else usage if isinstance(usage, dict) else normalized
-            connection.execute("INSERT OR REPLACE INTO usage(attempt_id,input_tokens,output_tokens,total_tokens,raw_usage_json) VALUES(?,?,?,?,?)", (record["attempt_id"], normalized.get("input_tokens"), normalized.get("output_tokens"), normalized.get("total_tokens"), json.dumps(raw_value, ensure_ascii=False)))
-        connection.commit()
-        connection.close()
+        with closing(db(self.db_path, self.db_timeout)) as connection:
+            connection.execute("UPDATE attempts SET completed_at=?,status=?,status_code=?,response_headers_json=?,first_byte_at=?,duration_ms=?,output_bytes=?,error_type=?,error_message=? WHERE id=?", values)
+            connection.execute("UPDATE calls SET completed_at=?,status=?,status_code=?,first_byte_at=?,duration_ms=?,output_bytes=?,error_type=?,error_message=? WHERE id=?", values[:1] + values[1:2] + values[2:3] + values[4:9] + (record["call_id"],))
+            connection.execute("UPDATE payloads SET response_body=?,response_content_type=?,response_complete=?,response_truncated=?,updated_at=? WHERE attempt_id=?", (bytes(record["out"]), record["response_content_type"], int(record["response_complete"]), int(record["response_truncated"]), iso(done), record["attempt_id"]))
+            normalized = normalize_usage(usage)
+            if normalized:
+                raw_value = raw_usage if isinstance(raw_usage, dict) else usage if isinstance(usage, dict) else normalized
+                connection.execute("INSERT OR REPLACE INTO usage(attempt_id,input_tokens,output_tokens,total_tokens,raw_usage_json) VALUES(?,?,?,?,?)", (record["attempt_id"], normalized.get("input_tokens"), normalized.get("output_tokens"), normalized.get("total_tokens"), json.dumps(raw_value, ensure_ascii=False)))
+            connection.commit()
         self._notify_resources({"calls"})
 
     @staticmethod
@@ -371,8 +413,12 @@ class Handler(BaseHTTPRequestHandler):
         return f'event: invalidate\ndata: {{"resource":"{resource}"}}\n\n'.encode()
 
     def _send_event(self, resource):
-        self.wfile.write(self._event_bytes(resource))
-        self.wfile.flush()
+        self._write_sse(self._event_bytes(resource))
+
+    def _write_sse(self, payload):
+        with self._sse_write_lock:
+            self.wfile.write(payload)
+            self.wfile.flush()
 
     def _notify_resources(self, resources):
         for client in list(self.clients):
@@ -386,8 +432,7 @@ class Handler(BaseHTTPRequestHandler):
                 except ValueError:
                     pass
 
-    def _handle_openai(self):
-        body = self._read_body()
+    def _handle_openai(self, body):
         _, model, stream = self._request_metadata(body)
         target = self.upstream.rstrip("/") + self.path
         try:
@@ -398,9 +443,11 @@ class Handler(BaseHTTPRequestHandler):
             self._finish_attempt(record)
             return
         response = None
+        response_started = False
         usage = None
         try:
-            request_headers = {key: value for key, value in self.headers.items() if key.lower() != "host"}
+            excluded_request_headers = hop_by_hop_headers(self.headers) | {"host"}
+            request_headers = {key: value for key, value in self.headers.items() if key.lower() not in excluded_request_headers}
             try:
                 response = open_url(Request(target, data=body, method=self.command, headers=request_headers), timeout=self.upstream_timeout)
             except HTTPError as exc:
@@ -413,12 +460,14 @@ class Handler(BaseHTTPRequestHandler):
             record["response_content_type"] = response.headers.get("Content-Type")
             if self._reject_redirect(response, record):
                 return
+            expected = self._response_content_length(response.headers)
             self.send_response(response.status)
+            excluded_response_headers = hop_by_hop_headers(response.headers)
             for key, value in response.headers.items():
-                if key.lower() not in HOP_BY_HOP:
+                if key.lower() not in excluded_response_headers:
                     self.send_header(key, value)
             self.end_headers()
-            expected = response.headers.get("Content-Length")
+            response_started = True
             while True:
                 chunk = response.read(8192)
                 if not chunk:
@@ -426,7 +475,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._capture_chunk(record, chunk)
                 self.wfile.write(chunk)
                 self.wfile.flush()
-            record["response_complete"] = expected is None or record["total_out"] == int(expected)
+            record["response_complete"] = expected is None or record["total_out"] == expected
             incomplete = not record["response_complete"]
             record["state"] = "succeeded" if record["status"] < 400 and not incomplete else "failed"
             if incomplete:
@@ -441,18 +490,19 @@ class Handler(BaseHTTPRequestHandler):
                 response.close()
         except Exception as exc:
             record["error_type"], record["error_message"], record["state"] = "upstream_error", str(exc), "failed"
-            record["status"] = record["status"] or 502
-            try:
-                self.send_error(502, "upstream unavailable")
-            except Exception:
-                pass
+            self.close_connection = True
+            if not response_started:
+                record["status"] = 502
+                try:
+                    self.send_error(502, "upstream unavailable")
+                except Exception:
+                    pass
         finally:
             if response is not None:
                 response.close()
             self._finish_attempt(record, usage)
 
-    def _handle_pi_messages(self):
-        body = self._read_body()
+    def _handle_pi_messages(self, body):
         parsed, model, _ = self._request_metadata(body)
         provider, _ = split_model_id(model)
         target = (self.sidecar_url.rstrip("/") + "/messages") if self.sidecar_url else "sidecar://unavailable/messages"
@@ -466,6 +516,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         state = PiMessagesState()
         response = None
+        response_started = False
         if not isinstance(parsed, dict) or not isinstance(model, str) or not isinstance(parsed.get("context"), dict):
             record["status"], record["error_type"], record["error_message"] = 400, "invalid_request", "model and context are required"
             self.send_error(400, "model and context are required")
@@ -493,10 +544,12 @@ class Handler(BaseHTTPRequestHandler):
             if self._reject_redirect(response, record, "sidecar_redirect"):
                 return
             self.send_response(response.status)
+            excluded_response_headers = hop_by_hop_headers(response.headers)
             for key, value in response.headers.items():
-                if key.lower() not in HOP_BY_HOP:
+                if key.lower() not in excluded_response_headers:
                     self.send_header(key, value)
             self.end_headers()
+            response_started = True
             while True:
                 chunk = response.read(8192)
                 if not chunk:
@@ -527,11 +580,14 @@ class Handler(BaseHTTPRequestHandler):
             if response is not None:
                 response.close()
         except Exception as exc:
-            record["state"], record["status"], record["error_type"], record["error_message"] = "failed", record["status"] or 503, "sidecar_unavailable", str(exc)
-            try:
-                self.send_error(503, "pi-ai sidecar unavailable")
-            except Exception:
-                pass
+            record["state"], record["error_type"], record["error_message"] = "failed", "sidecar_unavailable", str(exc)
+            self.close_connection = True
+            if not response_started:
+                record["status"] = 503
+                try:
+                    self.send_error(503, "pi-ai sidecar unavailable")
+                except Exception:
+                    pass
         finally:
             if response is not None:
                 response.close()
@@ -591,6 +647,12 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self._reject_untrusted_host():
             return
+        try:
+            self._read_body(max_length=0)
+        except ValueError as exc:
+            self._send_json_error(400, str(exc))
+            self.close_connection = True
+            return
         if self.path == "/models":
             self._proxy_sidecar_get("/models")
             return
@@ -603,7 +665,8 @@ class Handler(BaseHTTPRequestHandler):
         if self.path in ("/", "/index.html"):
             path = self.ui_path or os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "ui", "index.html")
             try:
-                raw = open(path, "rb").read()
+                with open(path, "rb") as stream:
+                    raw = stream.read()
             except OSError:
                 self.send_error(404)
                 return
@@ -613,9 +676,8 @@ class Handler(BaseHTTPRequestHandler):
                 call_id = int(self.path.rsplit("/", 1)[1])
             except (TypeError, ValueError):
                 self.send_error(400); return
-            connection = db(self.db_path, self.db_timeout)
-            row = connection.execute("SELECT c.*,a.request_headers_json,a.response_headers_json,p.request_body,p.response_body,p.request_truncated,p.response_truncated,u.input_tokens,u.output_tokens,u.total_tokens,u.raw_usage_json FROM calls c LEFT JOIN attempts a ON a.call_id=c.id LEFT JOIN payloads p ON p.attempt_id=a.id LEFT JOIN usage u ON u.attempt_id=a.id WHERE c.id=?", (call_id,)).fetchone()
-            connection.close()
+            with closing(db(self.db_path, self.db_timeout)) as connection:
+                row = connection.execute("SELECT c.*,a.request_headers_json,a.response_headers_json,p.request_body,p.response_body,p.request_truncated,p.response_truncated,u.input_tokens,u.output_tokens,u.total_tokens,u.raw_usage_json FROM calls c LEFT JOIN attempts a ON a.call_id=c.id LEFT JOIN payloads p ON p.attempt_id=a.id LEFT JOIN usage u ON u.attempt_id=a.id WHERE c.id=?", (call_id,)).fetchone()
             if not row:
                 self.send_error(404); return
             value = dict(row)
@@ -624,11 +686,15 @@ class Handler(BaseHTTPRequestHandler):
                 if isinstance(value.get(key), bytes): value[key] = value[key].decode("utf-8", errors="replace")
             raw = json.dumps(value, ensure_ascii=False).encode(); self._send_payload(200, raw, api=True); return
         if self.path == "/api/events":
-            self.send_response(200); self.send_header("Content-Type", "text/event-stream"); self.send_header("Cache-Control", "no-store"); self.send_header("Connection", "keep-alive"); self.send_header("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'"); self.send_header("X-Content-Type-Options", "nosniff"); self.send_header("Referrer-Policy", "no-referrer"); self.end_headers(); self.wfile.write(b"event: ready\ndata: {}\n\n"); self.wfile.flush(); self.clients.append(self)
-            self._sse_connection = db(self.db_path, self.db_timeout)
-            self._sse_change_id = self._sse_connection.execute("SELECT COALESCE(MAX(id), 0) FROM change_log").fetchone()[0]
-            self._sse_last_notified = set()
+            self.send_response(200); self.send_header("Content-Type", "text/event-stream"); self.send_header("Cache-Control", "no-store"); self.send_header("Connection", "keep-alive"); self.send_header("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'"); self.send_header("X-Content-Type-Options", "nosniff"); self.send_header("Referrer-Policy", "no-referrer"); self.end_headers()
+            self._sse_write_lock = threading.Lock()
+            self._write_sse(b"event: ready\ndata: {}\n\n")
+            self.clients.append(self)
+            self._sse_connection = None
             try:
+                self._sse_connection = db(self.db_path, self.db_timeout)
+                self._sse_change_id = self._sse_connection.execute("SELECT COALESCE(MAX(id), 0) FROM change_log").fetchone()[0]
+                self._sse_last_notified = set()
                 while True:
                     interval = max(0.01, float(self.sse_keepalive))
                     time.sleep(interval)
@@ -642,20 +708,23 @@ class Handler(BaseHTTPRequestHandler):
                         for resource in sorted(resources):
                             self._send_event(resource)
                         self._sse_last_notified = set()
-                    self.wfile.write(b": keepalive\n\n"); self.wfile.flush()
+                    self._write_sse(b": keepalive\n\n")
             except Exception:
-                if self in self.clients: self.clients.remove(self)
+                self.close_connection = True
             finally:
-                self._sse_connection.close()
+                if self in self.clients:
+                    self.clients.remove(self)
+                if self._sse_connection is not None:
+                    self._sse_connection.close()
                 self._sse_connection = None
             return
         if self.path not in ("/api/overview", "/api/calls", "/api/sessions"):
             if self.path.startswith("/api/"): self.send_error(404); return
             self.static(); return
-        connection = db(self.db_path, self.db_timeout)
-        calls = [dict(row) for row in connection.execute("SELECT id,session_id,created_at,completed_at,endpoint,model,status,status_code,duration_ms,input_bytes,output_bytes,error_type FROM calls ORDER BY id DESC LIMIT ?", (self.api_call_limit,))]
-        sessions = [dict(row) for row in connection.execute("SELECT s.id,s.agent,s.started_at,s.last_seen_at,s.cwd,s.project_name,(SELECT COUNT(*) FROM calls x WHERE x.session_id=s.id) AS call_count FROM sessions s ORDER BY s.id DESC")]
-        connection.close(); payload = {"calls": calls, "sessions": sessions}
+        with closing(db(self.db_path, self.db_timeout)) as connection:
+            calls = [dict(row) for row in connection.execute("SELECT id,session_id,created_at,completed_at,endpoint,model,status,status_code,duration_ms,input_bytes,output_bytes,error_type FROM calls ORDER BY id DESC LIMIT ?", (self.api_call_limit,))]
+            sessions = [dict(row) for row in connection.execute("SELECT s.id,s.agent,s.started_at,s.last_seen_at,s.cwd,s.project_name,(SELECT COUNT(*) FROM calls x WHERE x.session_id=s.id) AS call_count FROM sessions s ORDER BY s.id DESC")]
+        payload = {"calls": calls, "sessions": sessions}
         if self.path == "/api/overview":
             payload["security_warnings"] = list(self.security_warnings)
         if self.path == "/api/calls": payload = {"calls": calls}
@@ -667,21 +736,21 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self.path != "/api/config":
             self.send_error(404)
+            self.close_connection = True
             return
         if self.headers.get("X-Prompt-Harbor-Request") != "1":
-            self._send_payload(403, self._json_error(403, "missing X-Prompt-Harbor-Request header"), api=True)
+            self._send_payload(403, self._json_error("missing X-Prompt-Harbor-Request header"), api=True)
+            self.close_connection = True
             return
         try:
-            length = int(self.headers.get("Content-Length", "0") or 0)
-            if length > 1024 * 1024:
-                raise ValueError("configuration payload is too large")
-            payload = json.loads(self.rfile.read(max(0, length)))
+            payload = json.loads(self._read_body(max_length=1024 * 1024))
             if not isinstance(payload, dict):
                 raise ValueError("configuration payload must be an object")
             result = update_runtime_config(payload)
         except (ConfigError, ValueError, TypeError, json.JSONDecodeError) as exc:
-            raw = self._json_error(400, str(exc))
+            raw = self._json_error(str(exc))
             self._send_payload(400, raw, api=True)
+            self.close_connection = True
             return
         raw = json.dumps(result, ensure_ascii=False).encode()
         self._send_payload(200, raw, api=True)
@@ -714,9 +783,14 @@ class Handler(BaseHTTPRequestHandler):
                 response = open_url(Request(self.sidecar_url.rstrip("/") + path, headers=request_headers), timeout=self.sidecar_timeout)
             except HTTPError as exc:
                 response = exc
+            if response.status in REDIRECT_STATUSES:
+                self.send_error(502, "sidecar redirect refused")
+                self.close_connection = True
+                return
             body = response.read(); self.send_response(response.status)
+            excluded_response_headers = hop_by_hop_headers(response.headers)
             for key, value in response.headers.items():
-                if key.lower() not in HOP_BY_HOP: self.send_header(key, value)
+                if key.lower() not in excluded_response_headers: self.send_header(key, value)
             self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
         except Exception:
             self.send_error(503, "pi-ai sidecar unavailable")
@@ -728,7 +802,9 @@ class Handler(BaseHTTPRequestHandler):
         if not relative or ".." in relative.replace("\\", "/").split("/") or extension not in CONTENT_TYPES: self.send_error(404); return
         root = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "ui"); path = os.path.normpath(os.path.join(root, relative))
         if not path.startswith(root + os.sep): self.send_error(404); return
-        try: raw = open(path, "rb").read()
+        try:
+            with open(path, "rb") as stream:
+                raw = stream.read()
         except OSError: self.send_error(404); return
         self._send_payload(200, raw, CONTENT_TYPES[extension], cache_control="no-cache")
 
@@ -738,8 +814,10 @@ class Handler(BaseHTTPRequestHandler):
     def send_error(self, code, message=None, explain=None):
         """Keep error responses under the same browser security policy."""
         short = message or self.responses.get(code, ("",))[0]
-        body = f"<html><head><title>Error {code}</title></head><body><h1>Error {code}</h1><p>{short}</p></body></html>".encode()
-        self._send_payload(code, body, "text/html; charset=utf-8", api=self.path.startswith("/api/"), cache_control="no-store" if self.path.startswith("/api/") else None)
+        body = f"<html><head><title>Error {code}</title></head><body><h1>Error {code}</h1><p>{html.escape(str(short))}</p></body></html>".encode()
+        path = getattr(self, "path", "")
+        is_api = path.startswith("/api/")
+        self._send_payload(code, body, "text/html; charset=utf-8", api=is_api, cache_control="no-store" if is_api else None)
 
 
 def _config_updates(payload):
@@ -828,26 +906,25 @@ def _update_runtime_config(payload):
 
 def purge(path, retention_days=DEFAULT_RETENTION_DAYS, timeout=DEFAULT_DB_TIMEOUT):
     from .database import purge_calls
-    connection = db(path, timeout)
-    count = purge_calls(connection, retention_days)
-    cursors = [
-        getattr(client, "_sse_change_id")
-        for client in list(getattr(Handler, "clients", []))
-        if os.fspath(getattr(client, "db_path", "")) == os.fspath(path)
-        and isinstance(getattr(client, "_sse_change_id", None), int)
-    ]
-    if cursors:
-        # Every active client has consumed all entries up to its cursor. Keep
-        # anything newer than the slowest client so polling cannot skip it.
-        connection.execute("DELETE FROM change_log WHERE id <= ?", (min(cursors),))
-    else:
-        # With no subscribers, retention bounds the append-only log on disk.
-        connection.execute(
-            "DELETE FROM change_log WHERE julianday(changed_at) < julianday('now', ?)",
-            (f"-{retention_days} days",),
-        )
-    connection.commit()
-    connection.close()
+    with closing(db(path, timeout)) as connection:
+        count = purge_calls(connection, retention_days)
+        cursors = [
+            getattr(client, "_sse_change_id")
+            for client in list(getattr(Handler, "clients", []))
+            if os.fspath(getattr(client, "db_path", "")) == os.fspath(path)
+            and isinstance(getattr(client, "_sse_change_id", None), int)
+        ]
+        if cursors:
+            # Every active client has consumed all entries up to its cursor. Keep
+            # anything newer than the slowest client so polling cannot skip it.
+            connection.execute("DELETE FROM change_log WHERE id <= ?", (min(cursors),))
+        else:
+            # With no subscribers, retention bounds the append-only log on disk.
+            connection.execute(
+                "DELETE FROM change_log WHERE julianday(changed_at) < julianday('now', ?)",
+                (f"-{retention_days} days",),
+            )
+        connection.commit()
     return count
 
 
@@ -864,7 +941,11 @@ class GatewayHTTPServer(ThreadingHTTPServer):
 
     def server_close(self):
         stop_purge_worker(self)
-        super().server_close()
+        try:
+            super().server_close()
+        finally:
+            if Handler.gateway_server is self:
+                Handler.gateway_server = None
 
 
 def start_purge_worker(server, path, retention_days=DEFAULT_RETENTION_DAYS, interval=DEFAULT_PURGE_INTERVAL, timeout=DEFAULT_DB_TIMEOUT):
@@ -946,36 +1027,53 @@ def main(argv=None):
     if args.cmd == "init": print("initialized SQLite database:", path); return
     if args.cmd == "purge": print("purged", purge(path, settings.retention_days, settings.db_timeout), f"calls older than {settings.retention_days} days"); return
     if args.cmd == "list":
-        for row in db(path, settings.db_timeout).execute("SELECT id,created_at,endpoint,model,status,status_code,duration_ms,input_bytes,output_bytes FROM calls ORDER BY id DESC LIMIT ?", (settings.cli_call_limit,)):
+        with closing(db(path, settings.db_timeout)) as connection:
+            rows = connection.execute("SELECT id,created_at,endpoint,model,status,status_code,duration_ms,input_bytes,output_bytes FROM calls ORDER BY id DESC LIMIT ?", (settings.cli_call_limit,)).fetchall()
+        for row in rows:
             print(f"{row['id']} {row['created_at']} {row['model'] or '-'} {row['status']} {row['status_code'] or '-'} {row['duration_ms'] or '-'}ms {row['input_bytes']}/{row['output_bytes']} {row['endpoint']}")
         return
     if args.cmd == "show":
-        row = db(path, settings.db_timeout).execute("SELECT c.*,a.request_headers_json,a.response_headers_json,p.request_body,p.response_body,p.request_truncated,p.response_truncated FROM calls c JOIN attempts a ON a.call_id=c.id JOIN payloads p ON p.attempt_id=a.id WHERE c.id=?", (args.call_id,)).fetchone()
+        with closing(db(path, settings.db_timeout)) as connection:
+            row = connection.execute("SELECT c.*,a.request_headers_json,a.response_headers_json,p.request_body,p.response_body,p.request_truncated,p.response_truncated FROM calls c JOIN attempts a ON a.call_id=c.id JOIN payloads p ON p.attempt_id=a.id WHERE c.id=?", (args.call_id,)).fetchone()
         if not row: raise SystemExit("call not found")
         print("[HEADERS]\n" + json.dumps({"request": json.loads(row["request_headers_json"] or "{}"), "response": json.loads(row["response_headers_json"] or "{}")}, indent=2)); print(json.dumps({key: row[key] for key in ("id", "session_id", "created_at", "completed_at", "endpoint", "model", "stream", "status", "status_code", "first_byte_at", "duration_ms", "input_bytes", "output_bytes", "error_type", "error_message")}, indent=2)); print(f"truncated: request={row['request_truncated'] or 0} response={row['response_truncated'] or 0}"); print("\n[REQUEST]\n" + (row["request_body"] or b"").decode(errors="replace")); print("\n[RESPONSE]\n" + (row["response_body"] or b"").decode(errors="replace")); return
-    connection = db(path, settings.db_timeout); cursor = connection.execute("INSERT INTO sessions(agent,started_at,last_seen_at,cwd,metadata_json) VALUES(?,?,?,?,?)", ("codex", iso(), iso(), os.getcwd(), "{}")); session_id = cursor.lastrowid; connection.commit(); connection.close()
     sidecar_env = {"PI_AI_SIDECAR_TOKEN": settings.sidecar_token} if settings.sidecar_token else None
-    manager = SidecarProcess(url=settings.sidecar_url, command=settings.sidecar_command, timeout=settings.sidecar_start_timeout, stop_timeout=settings.sidecar_stop_timeout, env=sidecar_env); configured_sidecar = None
+    manager = SidecarProcess(url=settings.sidecar_url, command=settings.sidecar_command, timeout=settings.sidecar_start_timeout, stop_timeout=settings.sidecar_stop_timeout, env=sidecar_env)
+    configured_sidecar = None
     try:
-        if manager.configured: configured_sidecar = manager.start()
-    except SidecarStartupError as exc:
-        print("pi-ai sidecar unavailable:", exc, file=sys.stderr)
-    Handler.clients = []
-    Handler.db_path = path; Handler.upstream = settings.upstream; Handler.security_warnings = settings.upstream_warnings; Handler.sidecar_url = configured_sidecar; Handler.sidecar_token = settings.sidecar_token; Handler.session_id = session_id
-    Handler.sidecar_managed = manager.process is not None
-    Handler.db_timeout = settings.db_timeout; Handler.capture_max_body = settings.max_body; Handler.upstream_timeout = settings.upstream_timeout; Handler.sidecar_timeout = settings.sidecar_timeout; Handler.sse_keepalive = settings.sse_keepalive; Handler.api_call_limit = settings.api_call_limit; Handler.ui_path = settings.ui_path
-    Handler.config_path = settings.config_path
-    Handler.config_settings = settings_values(settings)
-    Handler.config_sources = resolve_sources(args)
-    host, port = validate_listen(settings.listen); print(f"gateway listening on http://{settings.listen}, upstream {settings.upstream}", flush=True)
-    for warning in settings.upstream_warnings:
-        print("WARNING: " + warning, file=sys.stderr, flush=True)
-    purge(path, settings.retention_days, settings.db_timeout)
-    server = GatewayHTTPServer((host, port), Handler)
-    Handler.gateway_server = server
-    start_purge_worker(server, path, settings.retention_days, settings.purge_interval, settings.db_timeout)
-    try: server.serve_forever()
-    finally: server.server_close(); manager.stop()
+        try:
+            if manager.configured:
+                configured_sidecar = manager.start()
+        except SidecarStartupError as exc:
+            print("pi-ai sidecar unavailable:", exc, file=sys.stderr)
+        Handler.clients = []
+        Handler.db_path = path; Handler.upstream = settings.upstream; Handler.security_warnings = settings.upstream_warnings; Handler.sidecar_url = configured_sidecar; Handler.sidecar_token = settings.sidecar_token; Handler.session_id = None
+        Handler.sidecar_managed = manager.process is not None
+        Handler.db_timeout = settings.db_timeout; Handler.capture_max_body = settings.max_body; Handler.upstream_timeout = settings.upstream_timeout; Handler.sidecar_timeout = settings.sidecar_timeout; Handler.sse_keepalive = settings.sse_keepalive; Handler.api_call_limit = settings.api_call_limit; Handler.ui_path = settings.ui_path
+        Handler.config_path = settings.config_path
+        Handler.config_settings = settings_values(settings)
+        Handler.config_sources = resolve_sources(args)
+        host, port = validate_listen(settings.listen)
+        purge(path, settings.retention_days, settings.db_timeout)
+        server = None
+        try:
+            server = GatewayHTTPServer((host, port), Handler)
+            Handler.gateway_server = server
+            with closing(db(path, settings.db_timeout)) as connection:
+                cursor = connection.execute("INSERT INTO sessions(agent,started_at,last_seen_at,cwd,metadata_json) VALUES(?,?,?,?,?)", ("codex", iso(), iso(), os.getcwd(), "{}"))
+                Handler.session_id = cursor.lastrowid
+                connection.commit()
+            start_purge_worker(server, path, settings.retention_days, settings.purge_interval, settings.db_timeout)
+            print(f"gateway listening on http://{settings.listen}, upstream {settings.upstream}", flush=True)
+            for warning in settings.upstream_warnings:
+                print("WARNING: " + warning, file=sys.stderr, flush=True)
+            server.serve_forever()
+        finally:
+            Handler.gateway_server = None
+            if server is not None:
+                server.server_close()
+    finally:
+        manager.stop()
 
 
 if __name__ == "__main__":

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import configparser
 import ipaddress
+import math
 import os
 import tempfile
 import re
@@ -33,6 +34,15 @@ class ConfigError(ValueError):
     """Raised when a configuration file or override is invalid."""
 
 
+def _is_loopback_hostname(hostname: str) -> bool:
+    if hostname == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(hostname).is_loopback
+    except ValueError:
+        return False
+
+
 def validate_upstream(value: str) -> tuple[str, ...]:
     """Validate the upstream origin and return user-facing security warnings.
 
@@ -58,12 +68,7 @@ def validate_upstream(value: str) -> tuple[str, ...]:
         raise ConfigError("upstream has invalid host or port") from exc
     if port is not None and not 1 <= port <= 65535:
         raise ConfigError("upstream has invalid port")
-    loopback = hostname == "localhost"
-    if not loopback:
-        try:
-            loopback = ipaddress.ip_address(hostname).is_loopback
-        except ValueError:
-            loopback = False
+    loopback = _is_loopback_hostname(hostname)
     if parsed.scheme == "http" and not loopback:
         raise ConfigError("upstream must use https; http is allowed only for loopback test fixtures")
     warnings = []
@@ -73,6 +78,26 @@ def validate_upstream(value: str) -> tuple[str, ...]:
     if parsed.scheme != "http" and normalized_origin != ("https", "api.openai.com", 443):
         warnings.append(f"custom upstream {parsed.scheme}://{parsed.netloc} will receive Authorization headers")
     return tuple(warnings)
+
+
+def validate_sidecar_url(value: str) -> None:
+    """Require the optional sidecar bridge to stay on the local machine."""
+    try:
+        parsed = urlsplit(value)
+        hostname = parsed.hostname.lower().rstrip(".") if parsed.hostname else ""
+        port = parsed.port
+    except (AttributeError, ValueError) as exc:
+        raise ConfigError("sidecar_url has invalid host or port") from exc
+    if parsed.scheme not in {"http", "https"} or not hostname:
+        raise ConfigError("sidecar_url must be an absolute HTTP(S) URL")
+    if parsed.username or parsed.password:
+        raise ConfigError("sidecar_url must not contain embedded credentials")
+    if parsed.query or parsed.fragment:
+        raise ConfigError("sidecar_url must not contain query parameters or a URL fragment")
+    if port is not None and not 1 <= port <= 65535:
+        raise ConfigError("sidecar_url has invalid port")
+    if not _is_loopback_hostname(hostname):
+        raise ConfigError("sidecar_url must target loopback")
 
 
 @dataclass(frozen=True)
@@ -182,7 +207,7 @@ def load_settings(cli: argparse.Namespace) -> Settings:
     parser = _read_config(config_path, explicit=bool(cli_config or env_config))
 
     integer = lambda field, section, key, env, default: _convert(field, _raw_value(cli, parser, field, section, key, env, default), int, lambda value: value > 0)
-    number = lambda field, section, key, env, default: _convert(field, _raw_value(cli, parser, field, section, key, env, default), float, lambda value: value > 0)
+    number = lambda field, section, key, env, default: _convert(field, _raw_value(cli, parser, field, section, key, env, default), float, lambda value: math.isfinite(value) and value > 0)
     string = lambda field, section, key, env, default: str(_raw_value(cli, parser, field, section, key, env, default)).strip()
     optional = lambda field, section, key, env: _optional(_raw_value(cli, parser, field, section, key, env, ""))
 
@@ -190,6 +215,9 @@ def load_settings(cli: argparse.Namespace) -> Settings:
     validate_listen(listen)
     upstream = string("upstream", "gateway", "upstream", "PROMPT_HARBOR_UPSTREAM", DEFAULT_UPSTREAM)
     upstream_warnings = validate_upstream(upstream)
+    sidecar_url = optional("pi_sidecar_url", "sidecar", "url", "PROMPT_HARBOR_PI_SIDECAR_URL")
+    if sidecar_url:
+        validate_sidecar_url(sidecar_url)
     return Settings(
         database=string("database", "gateway", "database", "PROMPT_HARBOR_DB", DEFAULT_DB),
         listen=listen,
@@ -207,7 +235,7 @@ def load_settings(cli: argparse.Namespace) -> Settings:
         sse_keepalive=number("sse_keepalive", "gateway", "sse_keepalive", "PROMPT_HARBOR_SSE_KEEPALIVE", DEFAULT_SSE_KEEPALIVE),
         purge_interval=number("purge_interval", "gateway", "purge_interval", "PROMPT_HARBOR_PURGE_INTERVAL", DEFAULT_PURGE_INTERVAL),
         ui_path=optional("ui_path", "gateway", "ui_path", "PROMPT_HARBOR_UI"),
-        sidecar_url=optional("pi_sidecar_url", "sidecar", "url", "PROMPT_HARBOR_PI_SIDECAR_URL"),
+        sidecar_url=sidecar_url,
         sidecar_command=optional("pi_sidecar_command", "sidecar", "command", "PROMPT_HARBOR_PI_SIDECAR_COMMAND"),
         sidecar_token=optional("pi_sidecar_token", "sidecar", "token", "PROMPT_HARBOR_MESSAGES_TOKEN"),
         config_path=config_path,
@@ -257,6 +285,8 @@ def validate_values(values: dict[str, object]) -> Settings:
         value = values.get(field)
         if value is None and CONFIG_FIELDS[field]["kind"] == "optional":
             value = ""
+        if isinstance(value, str) and ("\r" in value or "\n" in value):
+            raise ConfigError(f"{field} must not contain line breaks")
         setattr(cli, CLI_FIELD_NAMES.get(field, field), value)
     return load_settings(cli)
 

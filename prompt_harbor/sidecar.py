@@ -9,6 +9,8 @@ import subprocess
 import time
 from typing import Iterable, Optional, Union
 
+from .config import ConfigError, validate_sidecar_url
+
 
 class SidecarStartupError(RuntimeError):
     pass
@@ -38,6 +40,10 @@ class SidecarProcess:
 
     def start(self) -> Optional[str]:
         if self.url:
+            try:
+                validate_sidecar_url(self.url)
+            except ConfigError as exc:
+                raise SidecarStartupError(f"invalid pi sidecar URL: {exc}") from exc
             return self.url
         if not self.command:
             return None
@@ -47,28 +53,40 @@ class SidecarProcess:
         child_env = os.environ.copy()
         if self.env:
             child_env.update(self.env)
-        self.process = subprocess.Popen(
-            command,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1,
-            env=child_env,
-        )
+        try:
+            self.process = subprocess.Popen(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+                env=child_env,
+            )
+        except OSError as exc:
+            raise SidecarStartupError(f"cannot start pi sidecar: {exc}") from exc
         deadline = time.monotonic() + self.timeout
         assert self.process.stdout is not None
-        while time.monotonic() < deadline:
-            remaining = max(0.0, deadline - time.monotonic())
-            ready, _, _ = select.select([self.process.stdout], [], [], min(0.2, remaining))
-            if not ready:
-                if self.process.poll() is not None:
-                    break
-                continue
-            line = self.process.stdout.readline().strip()
-            if line.startswith("READY "):
-                self.url = "http://" + line[6:].strip()
-                return self.url
+        try:
+            while time.monotonic() < deadline:
+                remaining = max(0.0, deadline - time.monotonic())
+                ready, _, _ = select.select([self.process.stdout], [], [], min(0.2, remaining))
+                if not ready:
+                    if self.process.poll() is not None:
+                        break
+                    continue
+                line = self.process.stdout.readline().strip()
+                if line.startswith("READY "):
+                    candidate = "http://" + line[6:].strip()
+                    try:
+                        validate_sidecar_url(candidate)
+                    except ConfigError as exc:
+                        raise SidecarStartupError(f"pi sidecar reported an invalid address: {exc}") from exc
+                    self.url = candidate.rstrip("/")
+                    return self.url
+        except BaseException:
+            self.stop()
+            raise
         process = self.process
         self.stop()
         details = ""

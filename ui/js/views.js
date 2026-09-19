@@ -1,9 +1,9 @@
 import { esc, fmtDateTime, fmtDuration, fmtBytes, tryPrettyJSON } from './format.js';
-export { configView } from './config.js';
 
 export function statusPill(c) {
   const code = c.status_code;
-  const cls = code === null || code === undefined ? '' : code >= 200 && code < 400 ? 'ok' : 'err';
+  let cls = '';
+  if (code !== null && code !== undefined) cls = code >= 200 && code < 400 ? 'ok' : 'err';
   return `<span class="pill ${cls}">${esc(c.status || code || '—')}</span>`;
 }
 
@@ -114,8 +114,10 @@ export function detailView(detail) {
     ? `<h4>Usage</h4><pre>${esc(JSON.stringify({ input_tokens: c.input_tokens, output_tokens: c.output_tokens, total_tokens: c.total_tokens }, null, 2))}</pre>`
     : '';
   const error = c.error_message ? `<h4>Error</h4><pre>${esc(c.error_type)}: ${esc(c.error_message)}</pre>` : '';
+  const requestTruncated = c.request_truncated ? 'yes' : 'no';
+  const responseTruncated = c.response_truncated ? 'yes' : 'no';
   const truncated = c.request_truncated || c.response_truncated
-    ? `<p class="warn">Body truncated (request=${c.request_truncated ? 'yes' : 'no'}, response=${c.response_truncated ? 'yes' : 'no'})</p>`
+    ? `<p class="warn">Body truncated (request=${requestTruncated}, response=${responseTruncated})</p>`
     : '';
   return `<h3>Call ${esc(c.id)}</h3>
 <p><b>${esc(c.endpoint)}</b> · ${statusPill(c)} (${esc(c.status_code ?? '—')}) · ${esc(fmtDuration(c.duration_ms))} · in ${esc(fmtBytes(c.input_bytes))} / out ${esc(fmtBytes(c.output_bytes))}${c.stream ? ' · stream' : ''}</p>

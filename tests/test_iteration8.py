@@ -48,4 +48,3 @@ def test_redirect_response_is_not_sent_to_client():
         "response_complete": True,
     }
     assert handler.close_connection is True
-

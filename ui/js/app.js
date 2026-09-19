@@ -16,6 +16,11 @@ const CONN_LABEL = { live: 'live', poll: 'polling', off: 'offline' };
 
 function renderView() {
   title.textContent = TITLES[state.tab];
+  document.querySelectorAll('.nav button').forEach(button => {
+    const selected = button.dataset.tab === state.tab;
+    button.classList.toggle('active', selected);
+    button.setAttribute('aria-selected', selected ? 'true' : 'false');
+  });
   if (state.tab === 'calls') view.innerHTML = callsView(state);
   else if (state.tab === 'sessions') view.innerHTML = sessionsView(state);
   else if (state.tab === 'config') view.innerHTML = configView(state);
@@ -87,12 +92,8 @@ subscribe(type => {
   } else if (type === 'status') updateStatus();
 });
 
-document.querySelectorAll('.nav button').forEach(b => b.addEventListener('click', () => {
-  document.querySelectorAll('.nav button').forEach(x => {
-    x.classList.toggle('active', x === b);
-    x.setAttribute('aria-selected', x === b ? 'true' : 'false');
-  });
-  setTab(b.dataset.tab);
+document.querySelectorAll('.nav button').forEach(button => button.addEventListener('click', () => {
+  setTab(button.dataset.tab);
 }));
 
 refreshBtn.addEventListener('click', () => load());

@@ -51,7 +51,8 @@ class PiMessagesState:
     def feed(self, chunk: bytes) -> None:
         if self.terminal_type is not None or not chunk:
             return
-        self.buffer.extend(chunk.replace(b"\r\n", b"\n"))
+        self.buffer.extend(chunk)
+        self.buffer = bytearray(self.buffer.replace(b"\r\n", b"\n"))
         while b"\n\n" in self.buffer:
             raw, remainder = self.buffer.split(b"\n\n", 1)
             self.buffer = bytearray(remainder)
